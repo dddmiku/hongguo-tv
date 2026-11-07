@@ -1,4 +1,4 @@
-"""Publish an immutable TV release with a complete inherited PC migration feed."""
+"""Publish an immutable TV release and update feed in the dedicated TV repository."""
 import argparse
 import copy
 import hashlib
@@ -13,7 +13,7 @@ from urllib.parse import quote
 from github import request, token
 
 ROOT=Path(__file__).resolve().parents[1]
-REPO="dddmiku/hongguo-desktop-releases"
+REPO="dddmiku/hongguo-tv"
 API="https://api.github.com/repos/"+REPO
 SIGNING_CERT="7009c6ca8eedca64e259e16964e4112f6b181aaf7e47d9680a8d05b33af364e8"
 
@@ -21,13 +21,13 @@ def version():
     source=(ROOT/"app/build.gradle").read_text(encoding="utf-8")
     return re.search(r'versionName\s+"([0-9.]+)"',source).group(1),int(re.search(r'versionCode\s+(\d+)',source).group(1))
 
-def feed(previous, tv_version, code, apk, notes):
-    result=copy.deepcopy(previous)
-    windows=result.get("platforms",{}).get("windows-x86_64")
-    if not windows or not windows.get("url") or not result.get("version"):
-        raise RuntimeError("现有 PC 更新信息缺失，已停止发布以保留更新入口")
-    result["platforms"]["android-tv"]={"version":tv_version,"versionCode":code,"url":"https://github.com/"+REPO+"/releases/download/tv-v"+tv_version+"/"+apk.name,"size":apk.stat().st_size,"sha256":hashlib.sha256(apk.read_bytes()).hexdigest(),"notes":notes}
-    return result
+def feed(tv_version, code, apk, notes):
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",tv_version) or isinstance(code,bool) or not isinstance(code,int) or code<1:
+        raise ValueError("TV 版本号不正确")
+    if apk.name!="hongguo-tv-"+tv_version+".APK":raise ValueError("安装包名称与版本不一致")
+    digest=hashlib.sha256(apk.read_bytes()).hexdigest()
+    platform={"version":tv_version,"versionCode":code,"url":"https://github.com/"+REPO+"/releases/download/v"+tv_version+"/"+apk.name,"size":apk.stat().st_size,"sha256":digest,"notes":notes}
+    return {"version":tv_version,"sha256":digest,"notes":notes,"repository":"https://github.com/"+REPO,"platforms":{"android-tv":platform}}
 
 def call(method,path,secret,**kwargs):
     status,data=request(method,API+path,secret,**kwargs)
@@ -64,20 +64,14 @@ def upload(release,path,secret):
     print("已上传：",path.name,asset["size"],"bytes",flush=True)
 
 def publish(source_commit):
-    tv_version,code=version();tag="tv-v"+tv_version;secret=token()
+    tv_version,code=version();tag="v"+tv_version;secret=token()
     apk=ROOT/"app/build/outputs/apk/release"/("hongguo-tv-"+tv_version+".apk")
     if not apk.is_file():raise RuntimeError("正式签名安装包尚未生成")
     verify_signature(apk)
     notes=(ROOT/"docs/release-notes.md").read_text(encoding="utf-8")
-    previous_release=call("GET","/releases/latest",secret)
-    asset=next((a for a in previous_release["assets"] if a["name"]=="latest.json"),None)
-    if not asset:raise RuntimeError("原有更新清单暂时无法读取")
-    status,previous=request("GET",asset["browser_download_url"])
-    if status!=200:raise RuntimeError("读取原更新清单失败")
-    if isinstance(previous,bytes):previous=json.loads(previous)
     staging=ROOT/"_work/release";staging.mkdir(parents=True,exist_ok=True)
     public_apk=staging/("hongguo-tv-"+tv_version+".APK");shutil.copyfile(apk,public_apk)
-    latest=staging/"latest.json";latest.write_text(json.dumps(feed(previous,tv_version,code,public_apk,notes),ensure_ascii=False,indent=2),encoding="utf-8")
+    latest=staging/"latest.json";latest.write_text(json.dumps(feed(tv_version,code,public_apk,notes),ensure_ascii=False,indent=2),encoding="utf-8")
     sums=staging/"SHA256SUMS.txt";sums.write_text(hashlib.sha256(public_apk.read_bytes()).hexdigest()+"  "+public_apk.name+"\n",encoding="utf-8")
     remote=call("GET","/commits/"+source_commit,secret)
     if remote.get("sha")!=source_commit:raise RuntimeError("正式源码提交尚未推送")
@@ -88,9 +82,6 @@ def publish(source_commit):
     ref_status,ref=request("GET",API+"/git/ref/tags/"+tag,secret)
     if ref_status==200 and ref.get("object",{}).get("sha")!=source_commit:raise RuntimeError("该草稿已有不同源码标签，请检查后再发布")
     for path in (public_apk,latest,sums):upload(release,path,secret)
-    # Re-read before publication: a concurrently released PC version must never be lost.
-    current=call("GET","/releases/latest",secret)
-    if current["id"]!=previous_release["id"]:raise RuntimeError("发布期间 PC 更新入口已变化，请重新生成 TV 清单")
     require_draft(call("GET","/releases/"+str(release["id"]),secret))
     done=call("PATCH","/releases/"+str(release["id"]),secret,data={"draft":False,"make_latest":"true","target_commitish":source_commit,"body":notes,"name":"红果客厅 TV "+tv_version})
     if done.get("draft"):raise RuntimeError("发布未完成")

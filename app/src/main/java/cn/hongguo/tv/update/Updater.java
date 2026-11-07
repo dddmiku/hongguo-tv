@@ -31,7 +31,7 @@ public final class Updater {
 
     private static final String TAG = "HgUpdate";
 
-    private static final String REPO = "dddmiku/hongguo-desktop-releases";
+    private static final String REPO = "dddmiku/hongguo-tv";
     private static final String GH_LATEST =
             "https://github.com/" + REPO + "/releases/latest/download/latest.json";
 
