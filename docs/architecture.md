@@ -13,3 +13,5 @@ ProgressContract 明确两个业务数据形状。read_history/update 使用数�
 1.1.2 将取流失败、进度、画质和准备完成回调统一经过 postLoad：回到主线程后同时核对请求世代与 isFinishing/isDestroyed，消除后台检查通过后页面已经退出的间隙。媒体回调还核对当前 MediaPlayer 实例与请求世代；退出解绑监听、清空待播放文件、取消本页面 Handler 任务和弹窗。剧集输入为空时允许在缓存未初始化的状态下安全退出。
 
 原登录设备身份与签名桩保留，正式包仍采用原包名与签名。短信登录和 MFA 的端到端验证独立于可用会话恢复、协议测试及匿名视频解码，未经执行不能写成通过。
+
+1.2.0 在独立 QrLoginManager 中管理官网二维码与轮询。OfficialQrTransport 只访问白名单 HTTPS 授权地址，短期上下文留在内存；QrMobileVerifier 使用候选账号读取手机信息、历史、收藏，全部通过才由 Account.commitQr 在账号锁内复核起始身份并保存。账号页切换、返回与销毁会释放扫码线程和授权上下文。二维码直接解码服务端 PNG/JPEG，无需 WebView 常驻或额外二维码运行库。

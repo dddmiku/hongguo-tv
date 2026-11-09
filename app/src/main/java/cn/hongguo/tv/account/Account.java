@@ -82,7 +82,7 @@ public final class Account {
         return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
-    public static Account load(Context ctx) {
+    public static synchronized Account load(Context ctx) {
         SharedPreferences p = sp(ctx);
         return new Account(
                 p.getString(K_COOKIE, ""),
@@ -92,7 +92,7 @@ public final class Account {
                 p.getString(K_MOBILE, ""));
     }
 
-    public static void save(Context ctx, String cookie, String token, String uid,
+    public static synchronized void save(Context ctx, String cookie, String token, String uid,
                            String userName, String mobile) {
         sp(ctx).edit()
                 .putString(K_COOKIE, cookie == null ? "" : cookie)
@@ -104,7 +104,20 @@ public final class Account {
                 .apply();
     }
 
-    public static void clear(Context ctx) {
+    public static synchronized void clear(Context ctx) {
         sp(ctx).edit().clear().apply();
+    }
+
+    /** A tentative QR session exists only in memory until all mobile reads pass. */
+    static Account candidate(String cookie, String token, String uid, String name) {
+        return new Account(cookie, token, uid, name, "");
+    }
+
+    static synchronized void commitQr(Context ctx, Account candidate, String expectedIdentity)
+            throws java.io.IOException {
+        if (!load(ctx).sessionIdentity().equals(expectedIdentity)) {
+            throw new QrLoginManager.QrException("ACCOUNT_CHANGED", "账号已切换，已取消之前的扫码登录", false);
+        }
+        save(ctx, candidate.cookie, candidate.token, candidate.uid, candidate.userName, candidate.mobile);
     }
 }

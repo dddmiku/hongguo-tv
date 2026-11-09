@@ -37,8 +37,8 @@ android {
         // + 内置数字键盘（遥控器直接输手机号/验证码）+ Accept-Encoding 参与签名
         // 1.0.9：数字键盘改为按需弹出（聚焦输入框/点「输入号码」才显示，
         // 焦点离开自动收起，另有显式「收起」按钮）
-        versionCode 14
-        versionName "1.1.3"
+        versionCode 15
+        versionName "1.2.0"
 
 
         ndk {
@@ -121,6 +121,8 @@ android {
 }
 
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
     androidTestImplementation files("${android.sdkDirectory}/platforms/android-33/optional/android.test.runner.jar", "${android.sdkDirectory}/platforms/android-33/optional/android.test.base.jar")
     // JNA：唯一必需依赖，用于调用签名 so 里的固定偏移函数。
     //

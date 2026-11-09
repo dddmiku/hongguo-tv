@@ -2,6 +2,8 @@ package cn.hongguo.tv.ui;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -28,6 +30,7 @@ import java.util.List;
 
 import cn.hongguo.tv.account.Account;
 import cn.hongguo.tv.account.AccountApi;
+import cn.hongguo.tv.account.QrLoginManager;
 import cn.hongguo.tv.api.Api;
 
 /**
@@ -52,7 +55,41 @@ public class AccountActivity extends TvActivity {
 
     private LinearLayout accountCard;
     private LinearLayout loginForm;
+    private LinearLayout loginModes;
+    private LinearLayout qrPanel;
     private LinearLayout lists;
+
+    private TextView smsModeBtn;
+    private TextView qrModeBtn;
+    private ImageView qrImage;
+    private TextView qrPlaceholder;
+    private TextView qrStatusView;
+    private TextView qrExpiryView;
+    private TextView qrRefreshBtn;
+    private TextView qrCancelBtn;
+    private QrLoginManager qrLogin;
+    private boolean qrMode;
+    private boolean foreground;
+    private long qrUiGeneration;
+    private String qrAttemptId = "";
+    private String qrStatus = "cancelled";
+    private long qrExpiresAt;
+    private final Runnable qrExpiryTick = new Runnable() {
+        @Override public void run() {
+            if (!foreground || !qrMode || qrExpiresAt <= 0 || isQrTerminal(qrStatus)) return;
+            long seconds = Math.max(0, (qrExpiresAt - System.currentTimeMillis() + 999) / 1000);
+            qrExpiryView.setText(seconds > 0 ? "二维码有效期 · " + seconds + " 秒" : "二维码已过期，请刷新");
+            if (seconds <= 0) {
+                stopQrLogin();
+                qrStatus = "expired";
+                qrStatusView.setText("二维码已过期，请刷新后重新扫码");
+                qrPlaceholder.setText("二维码已过期");
+                qrRefreshBtn.requestFocus();
+                return;
+            }
+            qrExpiryView.postDelayed(this, 1000);
+        }
+    };
 
     private EditText mobileInput;
     private EditText codeInput;
@@ -149,12 +186,16 @@ public class AccountActivity extends TvActivity {
         accountCard.setOrientation(LinearLayout.VERTICAL);
         root.addView(accountCard);
 
+        buildLoginOptions(root);
+
         loginForm = new LinearLayout(this);
         loginForm.setOrientation(LinearLayout.VERTICAL);
         // 顶部不再留白：标题栏到手机号之间原来是 10dp + status 的 padding，
         // 叠起来约 40dp，正好是键盘最后一行的位置。
         loginForm.setPadding(0, 0, 0, 0);
         root.addView(loginForm);
+
+        buildQrPanel(root);
 
         lists = new LinearLayout(this);
         lists.setOrientation(LinearLayout.VERTICAL);
@@ -190,6 +231,214 @@ public class AccountActivity extends TvActivity {
         sv.setClipToPadding(false);
         setContentView(page);
         buildLoginForm();
+        wireLoginFocus();
+    }
+
+    private void buildLoginOptions(LinearLayout root) {
+        loginModes = TvUi.row(this);
+        loginModes.setTag("account-login-modes");
+        smsModeBtn = TvUi.tab(this, "验证码登录", true, () -> selectLoginMode(false));
+        smsModeBtn.setTag("account-mode-sms");
+        qrModeBtn = TvUi.tab(this, "扫码登录", false, () -> selectLoginMode(true));
+        qrModeBtn.setTag("account-mode-qr");
+        loginModes.addView(smsModeBtn, new LinearLayout.LayoutParams(dp(160), dp(42)));
+        LinearLayout.LayoutParams tab = new LinearLayout.LayoutParams(dp(160), dp(42));
+        tab.setMargins(dp(12), 0, 0, 0);
+        loginModes.addView(qrModeBtn, tab);
+        LinearLayout.LayoutParams modes = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        modes.setMargins(0, dp(4), 0, dp(10));
+        root.addView(loginModes, modes);
+    }
+
+    private void buildQrPanel(LinearLayout root) {
+        qrPanel = TvUi.column(this);
+        qrPanel.setTag("account-qr-panel");
+        qrPanel.setVisibility(View.GONE);
+        LinearLayout content = TvUi.row(this);
+        content.setGravity(Gravity.TOP);
+
+        FrameLayout imageBox = new FrameLayout(this);
+        imageBox.setBackground(TvFocus.round(this, 12, Color.WHITE, 0, 0));
+        imageBox.setPadding(dp(16), dp(16), dp(16), dp(16));
+        qrImage = new ImageView(this);
+        qrImage.setTag("account-qr-image");
+        qrImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        qrImage.setContentDescription("红果短剧 App 扫码登录二维码");
+        qrImage.setVisibility(View.INVISIBLE);
+        imageBox.addView(qrImage, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        qrPlaceholder = TvUi.text(this, "点击刷新二维码\n用红果短剧 App 扫描", 15, 0xFF4A4A4A);
+        qrPlaceholder.setGravity(Gravity.CENTER);
+        qrPlaceholder.setTag("account-qr-placeholder");
+        imageBox.addView(qrPlaceholder, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        content.addView(imageBox, new LinearLayout.LayoutParams(dp(244), dp(244)));
+
+        LinearLayout description = TvUi.column(this);
+        description.setPadding(dp(28), dp(6), 0, 0);
+        description.addView(TvUi.heading(this, "手机扫码，电视接着看", 22));
+        TextView steps = TvUi.text(this, "1. 手机打开红果短剧 App\n2. 进入「我的」，打开右上角菜单\n3. 在工具中点「扫一扫」，扫描左侧二维码\n4. 在手机上确认登录", 15, TvUi.DIM);
+        steps.setLineSpacing(dp(5), 1);
+        steps.setPadding(0, dp(14), 0, dp(12));
+        description.addView(steps);
+        qrStatusView = TvUi.text(this, "点击刷新二维码开始登录", 15, TvUi.TEXT);
+        qrStatusView.setTag("account-qr-status");
+        qrStatusView.setMinLines(2);
+        description.addView(qrStatusView);
+        qrExpiryView = TvUi.text(this, "", 12, TvUi.DIM);
+        qrExpiryView.setTag("account-qr-expiry");
+        qrExpiryView.setPadding(0, dp(3), 0, dp(8));
+        description.addView(qrExpiryView);
+
+        LinearLayout actions = TvUi.row(this);
+        qrRefreshBtn = TvUi.button(this, "刷新二维码", true, this::startQrLogin);
+        qrRefreshBtn.setTag("account-qr-refresh");
+        qrCancelBtn = TvUi.button(this, "取消扫码", false, this::cancelQrFromUi);
+        qrCancelBtn.setTag("account-qr-cancel");
+        actions.addView(qrRefreshBtn, new LinearLayout.LayoutParams(dp(142), dp(42)));
+        LinearLayout.LayoutParams cancel = new LinearLayout.LayoutParams(dp(132), dp(42));
+        cancel.setMargins(dp(12), 0, 0, 0);
+        actions.addView(qrCancelBtn, cancel);
+        description.addView(actions);
+        content.addView(description, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        qrPanel.addView(content);
+        TextView hint = TvUi.text(this, "登录后同步手机收藏与观看进度，也可以切换到验证码登录。", 12, TvUi.DIM);
+        hint.setPadding(0, dp(16), 0, 0);
+        qrPanel.addView(hint);
+        root.addView(qrPanel);
+    }
+
+    private void selectLoginMode(boolean scan) {
+        if (Account.load(this).loggedIn()) return;
+        qrMode = scan;
+        clearKeypad();
+        if (!scan) stopQrLogin();
+        smsModeBtn.setSelected(!scan);
+        smsModeBtn.setTextColor(!scan ? TvUi.ACCENT : TvUi.DIM);
+        qrModeBtn.setSelected(scan);
+        qrModeBtn.setTextColor(scan ? TvUi.ACCENT : TvUi.DIM);
+        loginForm.setVisibility(scan ? View.GONE : View.VISIBLE);
+        mobileInput.setFocusable(!scan);
+        codeInput.setFocusable(!scan);
+        qrPanel.setVisibility(scan ? View.VISIBLE : View.GONE);
+        wireLoginFocus();
+        if (scan) {
+            qrRefreshBtn.requestFocus();
+            if (foreground && qrLogin == null) startQrLogin();
+        } else smsModeBtn.requestFocus();
+    }
+
+    private void wireLoginFocus() {
+        if (smsModeBtn == null || mobileInput == null) return;
+        smsModeBtn.setNextFocusRightId(qrModeBtn.getId());
+        qrModeBtn.setNextFocusLeftId(smsModeBtn.getId());
+        smsModeBtn.setNextFocusUpId(accountBack.getId());
+        qrModeBtn.setNextFocusUpId(accountBack.getId());
+        accountBack.setNextFocusDownId(qrMode ? qrModeBtn.getId() : smsModeBtn.getId());
+        smsModeBtn.setNextFocusDownId(qrMode ? qrRefreshBtn.getId() : mobileInput.getId());
+        qrModeBtn.setNextFocusDownId(qrMode ? qrCancelBtn.getId() : mobileInput.getId());
+        qrRefreshBtn.setNextFocusUpId(qrModeBtn.getId());
+        qrCancelBtn.setNextFocusUpId(qrModeBtn.getId());
+        qrRefreshBtn.setNextFocusRightId(qrCancelBtn.getId());
+        qrCancelBtn.setNextFocusLeftId(qrRefreshBtn.getId());
+        mobileInput.setNextFocusUpId(smsModeBtn.getId());
+        mobileInput.setNextFocusDownId(codeInput.getId());
+        codeInput.setNextFocusUpId(mobileInput.getId());
+        sendCodeBtn.setNextFocusUpId(mobileInput.getId());
+        loginBtn.setNextFocusUpId(mobileInput.getId());
+        sendCodeBtn.setNextFocusLeftId(codeInput.getId());
+        sendCodeBtn.setNextFocusRightId(loginBtn.getId());
+        loginBtn.setNextFocusLeftId(sendCodeBtn.getId());
+    }
+
+    private void startQrLogin() {
+        if (!foreground || !qrMode || isDestroyed() || Account.load(this).loggedIn()) return;
+        stopQrLogin();
+        qrStatus = "loading";
+        qrStatusView.setText("正在生成二维码…");
+        qrPlaceholder.setText("正在生成二维码…");
+        qrExpiryView.setText("");
+        final long generation = ++qrUiGeneration;
+        qrLogin = new QrLoginManager(account, state -> runOnUiThread(() -> {
+            if (!isDestroyed() && foreground && qrMode && generation == qrUiGeneration) renderQrState(state);
+        }));
+        qrLogin.start();
+    }
+
+    private void renderQrState(QrLoginManager.State state) {
+        if (!qrMode || isDestroyed()) return;
+        qrAttemptId = state.id;
+        qrStatus = state.status;
+        qrStatusView.setText(state.message);
+        qrExpiresAt = state.expiresAt;
+        qrExpiryView.removeCallbacks(qrExpiryTick);
+        if ("confirmed".equals(state.status)) {
+            setStatus("扫码登录成功，已连接手机收藏和历史");
+            stopQrLogin();
+            refresh();
+            library.sync(true);
+            return;
+        }
+        if (state.terminal()) {
+            clearQrImage();
+            qrPlaceholder.setText("expired".equals(state.status) ? "二维码已过期" : "cancelled".equals(state.status) ? "已取消扫码登录" : "二维码暂时不可用");
+            qrExpiryView.setText("expired".equals(state.status) ? "请刷新二维码后重试" : "");
+        } else if (state.imageBytes != null && !showQrImage(state.imageBytes)) {
+            stopQrLogin();
+            qrStatus = "failed";
+            qrStatusView.setText("二维码图片暂时无法显示，请刷新重试");
+            qrPlaceholder.setText("二维码暂时不可用");
+        }
+        if (!isQrTerminal(qrStatus) && qrExpiresAt > 0) qrExpiryTick.run();
+    }
+
+    private boolean showQrImage(byte[] image) {
+        if (image.length == 0 || image.length > 512 * 1024) return false;
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(image, 0, image.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0 || bounds.outWidth > 2048 || bounds.outHeight > 2048) return false;
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        Bitmap bitmap = BitmapFactory.decodeByteArray(image, 0, image.length, options);
+        if (bitmap == null) return false;
+        qrImage.setImageBitmap(bitmap);
+        qrImage.setVisibility(View.VISIBLE);
+        qrPlaceholder.setVisibility(View.GONE);
+        return true;
+    }
+
+    private void clearQrImage() {
+        if (qrImage != null) {
+            qrImage.setImageDrawable(null);
+            qrImage.setVisibility(View.INVISIBLE);
+        }
+        if (qrPlaceholder != null) qrPlaceholder.setVisibility(View.VISIBLE);
+    }
+
+    private void stopQrLogin() {
+        qrUiGeneration++;
+        QrLoginManager previous = qrLogin;
+        qrLogin = null;
+        if (previous != null) { previous.cancel(); previous.close(); }
+        if (qrExpiryView != null) qrExpiryView.removeCallbacks(qrExpiryTick);
+        qrAttemptId = "";
+        qrExpiresAt = 0;
+        clearQrImage();
+    }
+
+    private void cancelQrFromUi() {
+        stopQrLogin();
+        qrStatus = "cancelled";
+        qrStatusView.setText("已取消扫码登录，刷新二维码即可重试");
+        qrPlaceholder.setText("已取消扫码登录");
+        qrExpiryView.setText("");
+        qrRefreshBtn.requestFocus();
+    }
+
+    private static boolean isQrTerminal(String status) {
+        return "confirmed".equals(status) || "expired".equals(status) || "cancelled".equals(status) || "failed".equals(status);
     }
 
     /** 屏幕底部固定键盘的容器（不随内容滚动）。 */
@@ -262,6 +511,8 @@ public class AccountActivity extends TvActivity {
         row.setGravity(Gravity.CENTER_VERTICAL);
 
         mobileInput = new EditText(this);
+        mobileInput.setId(View.generateViewId());
+        mobileInput.setId(View.generateViewId());
         mobileInput.setHint("手机号");
         mobileInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         mobileInput.setSingleLine(true);
@@ -294,6 +545,8 @@ public class AccountActivity extends TvActivity {
         row2.setLayoutParams(r2lp);
 
         codeInput = new EditText(this);
+        codeInput.setId(View.generateViewId());
+        codeInput.setId(View.generateViewId());
         codeInput.setHint("验证码");
         codeInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         codeInput.setSingleLine(true);
@@ -310,6 +563,8 @@ public class AccountActivity extends TvActivity {
         row2.addView(codeInput, clp);
 
         sendCodeBtn = new Button(this);
+        sendCodeBtn.setId(View.generateViewId());
+        sendCodeBtn.setId(View.generateViewId());
         sendCodeBtn.setText("获取验证码");
         sendCodeBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         sendCodeBtn.setAllCaps(false);
@@ -319,6 +574,8 @@ public class AccountActivity extends TvActivity {
         row2.addView(sendCodeBtn, slp);
 
         loginBtn = new Button(this);
+        loginBtn.setId(View.generateViewId());
+        loginBtn.setId(View.generateViewId());
         loginBtn.setText("登录");
         loginBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         loginBtn.setAllCaps(false);
@@ -424,10 +681,13 @@ public class AccountActivity extends TvActivity {
         Account a = Account.load(this);
         View focus = getCurrentFocus();
         boolean moveFocus = a.loggedIn() && (!loggedInUi || isInside(focus, loginForm)
-                || isInside(focus, keypadHost));
+                || isInside(focus, keypadHost) || isInside(focus, qrPanel) || isInside(focus, loginModes));
         loggedInUi = a.loggedIn();
         accountCard.removeAllViews();
         if (a.loggedIn()) {
+            stopQrLogin();
+            loginModes.setVisibility(View.GONE);
+            qrPanel.setVisibility(View.GONE);
             loginForm.setVisibility(View.GONE);
             mobileInput.setFocusable(false);
             codeInput.setFocusable(false);
@@ -439,11 +699,14 @@ public class AccountActivity extends TvActivity {
             loadLists();
             if (moveFocus) lists.post(() -> { if (!isDestroyed() && loggedInUi) focusAccountAction(); });
         } else {
-            mobileInput.setFocusable(true);
+            loginModes.setVisibility(View.VISIBLE);
+            mobileInput.setFocusable(!qrMode);
             mobileInput.setFocusableInTouchMode(true);
-            codeInput.setFocusable(true);
+            codeInput.setFocusable(!qrMode);
             codeInput.setFocusableInTouchMode(true);
-            loginForm.setVisibility(View.VISIBLE);
+            loginForm.setVisibility(qrMode ? View.GONE : View.VISIBLE);
+            qrPanel.setVisibility(qrMode ? View.VISIBLE : View.GONE);
+            wireLoginFocus();
             // 未登录不显示账号卡：一屏要放下表单 + 内置数字键盘，
             // 「未登录」这三个字不值得占掉一整行。
             lists.removeAllViews();
@@ -770,6 +1033,7 @@ public class AccountActivity extends TvActivity {
     // --------------------------------------------------------------- 登录
 
     private void doSendCode() {
+        if (qrMode || !foreground || !loginForm.isShown()) return;
         String mobile = mobileInput.getText().toString().trim();
         if (!mobile.matches("1\\d{10}")) {
             setStatus("请输入正确的手机号");
@@ -850,6 +1114,7 @@ public class AccountActivity extends TvActivity {
     }
 
     private void doLogin() {
+        if (qrMode || !foreground || !loginForm.isShown()) return;
         String mobile = mobileInput.getText().toString().trim();
         String code = codeInput.getText().toString().trim();
         if (!mobile.matches("1\\d{10}")) {
@@ -904,6 +1169,7 @@ public class AccountActivity extends TvActivity {
     }
 
     private void doLogout() {
+        stopQrLogin();
         Account.clear(this);
         if(library!=null)library.sync(false);
         setStatus("已退出登录");
@@ -1276,7 +1542,9 @@ public class AccountActivity extends TvActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        foreground = true;
         if(loginForm!=null)refresh();
+        if(qrMode && !Account.load(this).loggedIn() && qrLogin==null)startQrLogin();
         if(library!=null){library.observe(libraryUpdated);library.sync(false);}
         // 从「允许安装未知应用」授权页回来：已经下好包就接着装
         java.io.File apk = pendingApk;
@@ -1317,8 +1585,9 @@ public class AccountActivity extends TvActivity {
      *   这里改成「每次按键之后检查一次当前焦点落在哪」，只有焦点真的
      *   跑到键盘和输入框之外才收，判断稳定。
      */
-    @Override protected void onPause(){clearKeypad();if(library!=null)library.unobserve(libraryUpdated);super.onPause();}
-    @Override protected void onDestroy(){if(library!=null)library.unobserve(libraryUpdated);super.onDestroy();}
+    @Override protected void onPause(){foreground=false;stopQrLogin();clearKeypad();if(library!=null)library.unobserve(libraryUpdated);super.onPause();}
+    @Override protected void onStop(){stopQrLogin();super.onStop();}
+    @Override protected void onDestroy(){stopQrLogin();if(library!=null)library.unobserve(libraryUpdated);super.onDestroy();}
 
     @Override
     public boolean dispatchKeyEvent(android.view.KeyEvent event) {

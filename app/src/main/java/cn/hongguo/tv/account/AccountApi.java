@@ -149,6 +149,21 @@ public final class AccountApi {
         return contentCall("GET", "/reading/user/info/v", null, a);
     }
 
+    String qrIdentity() { return Account.load(context).sessionIdentity(); }
+
+    Account verifyQrCandidate(Account candidate) throws IOException {
+        return QrMobileVerifier.verify(candidate, (path, query, session) -> {
+            String url=contentUrl(path,query);
+            Map<String,String> headers=contentHeaders(session);
+            headers.putAll(signer.sign(url,headers));
+            return OfficialQrTransport.readMobile(url,headers);
+        });
+    }
+
+    void commitQrCandidate(Account candidate, String originIdentity) throws IOException {
+        Account.commitQr(context, candidate, originIdentity);
+    }
+
     // --------------------------------------------------------------- 历史
 
     public static final class HistoryPage {
