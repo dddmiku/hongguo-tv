@@ -18,7 +18,7 @@ android {
         minSdk 24
         targetSdk 33
         testInstrumentationRunner "android.test.InstrumentationTestRunner"
-        // TV 端有独立的版本线：桌面端已经到 1.9.x，两边功能集完全不同，
+        // TV 与新版桌面端分别维护版本线，两边功能集不同，
         // 混用同一个版本号会让更新检测永远提示「有新版本」。
         // 用纯数字版本号，避免 compare() 把后缀解析成 0 造成的歧义。
         // 1.0.2：首页改单行顶栏（账号入口在右上角）+ 焦点框不再缩放
@@ -37,8 +37,8 @@ android {
         // + 内置数字键盘（遥控器直接输手机号/验证码）+ Accept-Encoding 参与签名
         // 1.0.9：数字键盘改为按需弹出（聚焦输入框/点「输入号码」才显示，
         // 焦点离开自动收起，另有显式「收起」按钮）
-        versionCode 15
-        versionName "1.2.0"
+        versionCode 16
+        versionName "1.3.0"
 
 
         ndk {

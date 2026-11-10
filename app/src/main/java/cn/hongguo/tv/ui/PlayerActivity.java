@@ -33,6 +33,9 @@ import cn.hongguo.tv.cache.MediaCache;
 import cn.hongguo.tv.cache.PlayProgress;
 import cn.hongguo.tv.media.EpisodePreparer;
 import cn.hongguo.tv.media.TrackPicker;
+import cn.hongguo.tv.media.SeasonPlaybackCoordinator;
+import cn.hongguo.tv.media.PreparationCancellation;
+import cn.hongguo.tv.cache.SeasonRepository;
 
 /**
  * 播放页：连续播放 + 进度记忆 + 清晰度切换 + 倍速。
@@ -57,6 +60,8 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     public static final String EXTRA_COVER = "cover";
     public static final String EXTRA_EPISODES = "episodes";
     public static final String EXTRA_START_INDEX = "start_index";
+    private static final String STATE_IDENTITY = "playback_identity";
+    private static final String STATE_POSITION = "start_position_ms";
 
     private static final int SEEK_MS = 10000;
     /** 进度自动保存间隔。 */
@@ -112,6 +117,31 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     private boolean foreground;
     private android.app.AlertDialog playbackMenu;
     private android.app.AlertDialog episodePicker;
+    private android.app.AlertDialog seasonPicker;
+    private TextView seasonsView;
+    private SeasonRepository seasons;
+    private SeasonRepository.Overview seasonOverview;
+    private final SeasonPlaybackCoordinator seasonPlayback = new SeasonPlaybackCoordinator();
+    /** EpisodePreparer writes fixed cache files; serialize preparation without another decoder. */
+    private static final Object preparationLock = new Object();
+    private PreparationCancellation episodePreparation, seasonPreparation;
+    private boolean overviewBusy, showSeasonsWhenReady, nextPreparing, switchingSeason;
+    private String overviewError = "", nextError = "";
+    private SeasonTarget nextTarget;
+    private SeasonRepository.Season retrySeason;
+    private String playbackIdentity;
+    private int favoriteGeneration;
+    private boolean userPaused, seeking, armAfterSeekAdvance;
+    private boolean playbackWanted = true;
+    private int seekSettledPosition;
+
+    private static final class SeasonTarget {
+        SeasonRepository.Season season;
+        List<Ep> episodes;
+        File file;
+        String definition;
+        int cap, firstIndex;
+    }
 
 
     /** 当前清晰度上限，用于切换。 */
@@ -142,6 +172,14 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        String identity = cn.hongguo.tv.account.Account.load(this).sessionIdentity();
+        if (savedInstanceState != null && savedInstanceState.containsKey(EXTRA_SERIES_ID)) {
+            if (!identity.equals(savedInstanceState.getString(STATE_IDENTITY, ""))) { finish(); return; }
+            restorePlaybackIntent(savedInstanceState);
+        }
+        String intentIdentity = getIntent().getStringExtra(STATE_IDENTITY);
+        if (intentIdentity != null && !identity.equals(intentIdentity)) { finish(); return; }
+        getIntent().putExtra(STATE_IDENTITY, identity);
         cn.hongguo.tv.sign.RequestSigner.bind(this);
         seriesId = getIntent().getStringExtra(EXTRA_SERIES_ID);
         seriesTitle = getIntent().getStringExtra(EXTRA_TITLE);
@@ -160,6 +198,9 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         progress = new PlayProgress(this);
         library = cn.hongguo.tv.cache.LibraryRepository.get(this);
         playbackOwner = library.owner();
+        playbackIdentity = cn.hongguo.tv.account.Account.load(this).sessionIdentity();
+        seasons = new SeasonRepository(api);
+        seasonPlayback.enter(seriesId, playbackIdentity);
         requestedStartPosition = getIntent().getLongExtra("start_position_ms",-1);
         autoplay = getPreferences(0).getBoolean("autoplay",true);
         capIndex = Math.max(0,Math.min(CAPS.length-1,getPreferences(0).getInt("quality",0)));
@@ -168,6 +209,13 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         account = new cn.hongguo.tv.account.AccountApi(this);
         // 沿用上次选的画面比例模式
         aspectMode = progress.aspectMode();
+        if (savedInstanceState != null && savedInstanceState.containsKey(EXTRA_SERIES_ID)) {
+            capIndex = Math.max(0, Math.min(CAPS.length - 1, savedInstanceState.getInt("player_quality", capIndex)));
+            speedIndex = Math.max(0, Math.min(SPEEDS.length - 1, savedInstanceState.getInt("player_speed", speedIndex)));
+            aspectMode = Math.max(0, Math.min(MODE_NAMES.length - 1, savedInstanceState.getInt("player_aspect", aspectMode)));
+            autoplay = savedInstanceState.getBoolean("player_autoplay", autoplay);
+            playbackWanted = savedInstanceState.getBoolean("player_wanted", true);
+        }
 
         buildUi();
 
@@ -176,7 +224,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         if (start < 0) {
             start = indexOfEpisode(progress.episode(seriesId));
         }
-        play(Math.max(0, Math.min(start, episodes.size() - 1)));
+        index = Math.max(0, Math.min(start, episodes.size() - 1));
         // 后台读一次云端最新集号，用于进度合并保护（不阻塞播放）
         library.uploadPending();
         // 后台查一次收藏状态（未登录会立刻返回，不发请求）
@@ -281,6 +329,17 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         qlp.setMargins(dp(16), 0, 0, 0);
         infoRow.addView(qualityView, qlp);
 
+        TextView episodeView = overlayAction("选集", this::showEpisodePicker);
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        elp.setMargins(dp(10), 0, 0, 0);
+        infoRow.addView(episodeView, elp);
+        seasonsView = overlayAction("全部季", this::showSeasonPicker);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.setMargins(dp(10), 0, 0, 0);
+        infoRow.addView(seasonsView, slp);
+
         // 收藏按钮：遥控器按 F（菜单键已被清晰度占用），或鼠标点击。
         // 和 qualityView 一样不能 focusable —— 播放页所有按键由 onKeyDown
         // 统一处理，可聚焦的子 View 会先吃掉确定键。
@@ -328,6 +387,21 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         setContentView(root);
     }
 
+    private TextView overlayAction(String label, Runnable action) {
+        TextView view = new TextView(this);
+        view.setText(label);
+        view.setTextColor(Color.WHITE);
+        view.setTextSize(13);
+        view.setPadding(dp(10), dp(4), dp(10), dp(4));
+        view.setFocusable(false);
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(10));
+        background.setColor(0xDD263750);
+        view.setBackground(background);
+        view.setOnClickListener(v -> action.run());
+        return view;
+    }
+
     // ------------------------------------------------------------ 播放控制
 
     private void play(int i) {
@@ -336,9 +410,15 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         }
         // 切集前先存当前进度，否则切走后进度丢失
         flushProgress();
+        cancelEpisodePreparation();
+        cancelSeasonWork();
+        nextError = "";
+        retrySeason = null;
         index = i;
         Ep ep = episodes.get(i);
         final int request=++loadGeneration;
+        final PreparationCancellation cancellation = new PreparationCancellation();
+        episodePreparation = cancellation;
         releasePlayer();
         setStatus("第 " + ep.num + " 集 加载中…");
         titleView.setText(seriesTitle + "  第 " + ep.num + " 集");
@@ -363,8 +443,10 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 });
                 // 缓存键要带清晰度，否则换档会命中旧档的文件
                 String bucket = t.definition;
+                synchronized (preparationLock) {
+                if (request != loadGeneration || cancellation.cancelled()) return;
                 preparer.prepare(ep.vid, bucket, t.mainUrl, t.spadeA,
-                        t.encrypted, new EpisodePreparer.Listener() {
+                        t.encrypted, cancellation, new EpisodePreparer.Listener() {
                             @Override
                             public void onProgress(String stage, int pct) {
                                 postLoad(request, () -> setStatus("第 " + ep.num + " 集 "
@@ -381,18 +463,20 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                                 postLoad(request, () -> fail(message));
                             }
                         });
+                }
             } catch (Throwable e) {
                 Log.e(TAG, "取流异常", e);
                 String message = e.getMessage();
                 postLoad(request, () -> fail(message == null || message.isEmpty() ? "取流失败，请稍后重试" : message));
             }
         }, "episode-load").start();
+        checkSeasonTail();
     }
 
     /** Check lifetime and request generation together on the same thread that owns the views. */
     private void postLoad(int request, Runnable action) {
         ui.post(() -> {
-            if (request == loadGeneration && playbackUiActive()) action.run();
+            if (request == loadGeneration && playbackUiActive() && foreground && samePlaybackAccount()) action.run();
         });
     }
 
@@ -401,11 +485,12 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     }
 
     private boolean currentPlayer(MediaPlayer candidate, int request) {
-        return candidate == player && request == loadGeneration && playbackUiActive();
+        return candidate == player && request == loadGeneration && playbackUiActive()
+                && foreground && samePlaybackAccount();
     }
 
     private void startPlayback(File f, int epNum) {
-        if (!playbackUiActive()) return;
+        if (!playbackUiActive() || !foreground || !samePlaybackAccount()) return;
         if (!surfaceReady) {
             pendingFile = f;
             return;
@@ -437,20 +522,39 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 }
                 applySpeed();
                 setStatus("播放中" + (at > 0 ? "（续播）" : ""));
-                if(foreground)mp.start();
+                userPaused = !playbackWanted;
+                seeking = false;
+                armAfterSeekAdvance = false;
+                if (!userPaused) {
+                    seasonPlayback.armCompletion();
+                    if(foreground)mp.start();
+                } else setStatus("已暂停");
                 startTicker();
                 scheduleHideOverlay();
+                checkSeasonTail();
             });
             player.setOnCompletionListener(mp -> {
-                if (!currentPlayer(mp, request)) return;
+                if (!currentPlayer(mp, request) || !seasonPlayback.completionArmed()
+                        || userPaused || seeking || !completedNearEnd(mp)) return;
                 flushProgress();
-                if (!foreground) return;
+                if (!foreground || switchingSeason) return;
                 if (autoplay && index + 1 < episodes.size()) {
                     play(index + 1);
+                } else if (autoplay) {
+                    seasonPlayback.completed();
+                    continueAtSeasonEnd();
                 } else {
                     setStatus(autoplay?"已是最后一集":"本集播放完毕");
                     showOverlay();
                 }
+            });
+            player.setOnSeekCompleteListener(mp -> {
+                if (!currentPlayer(mp, request) || !seeking) return;
+                seeking = false;
+                seekSettledPosition = mp.getCurrentPosition();
+                armAfterSeekAdvance = !userPaused;
+                if (armAfterSeekAdvance) ui.postDelayed(armSeekCompletion, 100);
+                checkSeasonTail();
             });
             player.setOnErrorListener((mp, what, extra) -> {
                 if (!currentPlayer(mp, request)) return true;
@@ -463,6 +567,13 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
             Log.e(TAG, "起播异常", e);
             fail("无法播放：" + e.getMessage());
         }
+    }
+
+    private boolean completedNearEnd(MediaPlayer decoder) {
+        try {
+            int duration = decoder.getDuration();
+            return duration > 0 && decoder.getCurrentPosition() >= Math.max(0, duration - 750);
+        } catch (IllegalStateException error) { return false; }
     }
 
     /**
@@ -569,6 +680,11 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 try {
                     int pos = player.getCurrentPosition();
                     int dur = player.getDuration();
+                    if (armAfterSeekAdvance && !userPaused && player.isPlaying()
+                            && pos > seekSettledPosition + 100) {
+                        armAfterSeekAdvance = false;
+                        seasonPlayback.armCompletion();
+                    }
                     if (dur > 0) {
                         bar.setProgress((int) (pos * 1000L / dur));
                         timeView.setText(String.format(Locale.US, "%s / %s  %s×",
@@ -578,6 +694,20 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 }
                 ui.postDelayed(this, 1000);
             }
+        }
+    };
+
+    private final Runnable armSeekCompletion = new Runnable() {
+        @Override public void run() {
+            if (!armAfterSeekAdvance || !foreground || userPaused || seeking || !prepared
+                    || player == null || !samePlaybackAccount()) return;
+            try {
+                if (!player.isPlaying()) return;
+                if (player.getCurrentPosition() > seekSettledPosition + 100) {
+                    armAfterSeekAdvance = false;
+                    seasonPlayback.armCompletion();
+                } else ui.postDelayed(this, 100);
+            } catch (IllegalStateException ignored) { }
         }
     };
 
@@ -609,7 +739,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     }
 
     private void saveProgress() {
-        if(player==null||!prepared||library==null||!playbackOwner.equals(library.owner()))return;
+        if(player==null||!prepared||library==null||!samePlaybackAccount())return;
         try {
             cn.hongguo.tv.cache.WatchRecord r=new cn.hongguo.tv.cache.WatchRecord();
             r.seriesId=seriesId;r.title=seriesTitle==null?"":seriesTitle;r.cover=seriesCover;
@@ -620,6 +750,275 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     }
 
     private void flushProgress(){forceFlush=true;try{saveProgress();}finally{forceFlush=false;}}
+
+    private boolean samePlaybackAccount() {
+        return library != null && playbackOwner != null && playbackOwner.equals(library.owner())
+                && playbackIdentity.equals(cn.hongguo.tv.account.Account.load(this).sessionIdentity());
+    }
+
+    private boolean currentSeasonWork(SeasonPlaybackCoordinator.Ticket ticket) {
+        return playbackUiActive() && samePlaybackAccount()
+                && seasonPlayback.accepts(ticket, seriesId, playbackIdentity, foreground);
+    }
+
+    /** Do not retain an automatic jump across pause, seek, episode choice or another season choice. */
+    private void cancelSeasonWork() {
+        seasonPlayback.cancel();
+        if (seasonPreparation != null) { seasonPreparation.cancel(); seasonPreparation = null; }
+        seeking = false;
+        armAfterSeekAdvance = false;
+        ui.removeCallbacks(armSeekCompletion);
+        overviewBusy = false;
+        showSeasonsWhenReady = false;
+        nextPreparing = false;
+        switchingSeason = false;
+        updateSeasonLabel();
+    }
+
+    private void cancelEpisodePreparation() {
+        if (episodePreparation != null) { episodePreparation.cancel(); episodePreparation = null; }
+    }
+
+    private void updateSeasonLabel() {
+        if (seasonsView != null) seasonsView.setText(overviewBusy ? "全部季 · 查询中"
+                : !overviewError.isEmpty() ? "全部季 · 重试" : "全部季");
+    }
+
+    private void checkSeasonTail() {
+        if (foreground && !episodes.isEmpty() && index >= Math.max(0, episodes.size() - 3))
+            loadSeasonOverview(false, false);
+    }
+
+    private void loadSeasonOverview(boolean refresh, boolean showPicker) {
+        if (!foreground || !playbackUiActive() || !samePlaybackAccount()) return;
+        if (!refresh && seasonOverview != null && seriesId.equals(seasonOverview.seriesId)) {
+            if (showPicker) displaySeasonPicker();
+            prepareNextSeason();
+            return;
+        }
+        if (overviewBusy) { showSeasonsWhenReady |= showPicker; return; }
+        overviewBusy = true;
+        showSeasonsWhenReady = showPicker;
+        overviewError = "";
+        updateSeasonLabel();
+        final SeasonPlaybackCoordinator.Ticket ticket = seasonPlayback.ticket();
+        new Thread(() -> {
+            try {
+                SeasonRepository.Overview result = seasons.overview(ticket.seriesId, refresh);
+                ui.post(() -> {
+                    if (!currentSeasonWork(ticket)) return;
+                    overviewBusy = false;
+                    seasonOverview = result;
+                    updateSeasonLabel();
+                    if (showSeasonsWhenReady) { showSeasonsWhenReady = false; displaySeasonPicker(); }
+                    prepareNextSeason();
+                    if (seasonPlayback.ended()) continueAtSeasonEnd();
+                });
+            } catch (Exception error) {
+                ui.post(() -> {
+                    if (!currentSeasonWork(ticket)) return;
+                    overviewBusy = false;
+                    overviewError = "暂时读取不到全部季，请重试";
+                    updateSeasonLabel();
+                    if (showSeasonsWhenReady || seasonPlayback.ended()) {
+                        showSeasonsWhenReady = false;
+                        setStatus(overviewError);
+                        showOverlay();
+                    }
+                });
+            }
+        }, "season-overview").start();
+    }
+
+    private void showSeasonPicker() {
+        if (!foreground || !playbackUiActive()) return;
+        showOverlay();
+        if (seasonPicker != null && seasonPicker.isShowing()) return;
+        loadSeasonOverview(!overviewError.isEmpty(), true);
+    }
+
+    private void displaySeasonPicker() {
+        if (seasonOverview == null || seasonOverview.items.isEmpty()
+                || seasonPicker != null && seasonPicker.isShowing()) return;
+        List<SeasonRepository.Season> items = seasonOverview.items;
+        String[] labels = new String[items.size()];
+        int selected = -1;
+        for (int i = 0; i < items.size(); i++) {
+            SeasonRepository.Season season = items.get(i);
+            boolean current = seriesId.equals(season.series.seriesId);
+            if (current) selected = i;
+            labels[i] = "第 " + season.number + " 季 · " + season.series.title + " · "
+                    + season.series.episodeCount + " 集" + (current ? " · 正在播放" : "");
+        }
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(this)
+                .setTitle("全部季")
+                .setSingleChoiceItems(labels, selected, (dialog, which) -> {
+                    dialog.dismiss();
+                    selectSeason(items.get(which));
+                }).setNegativeButton("返回播放", null)
+                .setNeutralButton("刷新", (dialog, which) -> loadSeasonOverview(true, true));
+        if (!nextError.isEmpty() && retrySeason != null)
+            builder.setPositiveButton("重试切季", (dialog, which) -> selectSeason(retrySeason));
+        seasonPicker = builder.show();
+    }
+
+    private void prepareNextSeason() {
+        if (!foreground || !prepared || switchingSeason || episodes.isEmpty() || index != episodes.size() - 1
+                || seasonOverview == null || seasonOverview.next == null || nextPreparing
+                || !nextError.isEmpty()) return;
+        SeasonRepository.Season next = seasonOverview.next;
+        if (nextTarget != null && nextTarget.cap == CAPS[capIndex]
+                && next.series.seriesId.equals(nextTarget.season.series.seriesId)) return;
+        nextPreparing = true;
+        final SeasonPlaybackCoordinator.Ticket ticket = seasonPlayback.ticket();
+        prepareSeasonTarget(next, ticket, false);
+    }
+
+    private void selectSeason(SeasonRepository.Season season) {
+        if (!foreground || !samePlaybackAccount()) return;
+        if (seriesId.equals(season.series.seriesId)) {
+            requestedStartPosition = 0;
+            play(indexOfEpisode(season.firstEpisode));
+            return;
+        }
+        if (!prepared) {
+            cancelEpisodePreparation();
+            ++loadGeneration;
+            releasePlayer();
+        }
+        cancelSeasonWork();
+        switchingSeason = true;
+        nextError = "";
+        retrySeason = null;
+        setStatus("正在准备第 " + season.number + " 季…");
+        showOverlay();
+        SeasonPlaybackCoordinator.Ticket ticket = seasonPlayback.ticket();
+        if (nextTarget != null && nextTarget.cap == CAPS[capIndex]
+                && season.series.seriesId.equals(nextTarget.season.series.seriesId)) {
+            switchToSeason(nextTarget, ticket);
+        } else prepareSeasonTarget(season, ticket, true);
+    }
+
+    /** Resolve and decrypt the first episode using the same cache path as normal episode playback. */
+    private void prepareSeasonTarget(SeasonRepository.Season season,
+                                     SeasonPlaybackCoordinator.Ticket ticket, boolean manual) {
+        final int cap = CAPS[capIndex];
+        final PreparationCancellation cancellation = new PreparationCancellation();
+        seasonPreparation = cancellation;
+        new Thread(() -> {
+            try {
+                JSONArray json = Api.parseEpisodes(api.episodes(season.series.seriesId), season.series.seriesId);
+                List<Ep> targetEpisodes = readEpisodes(json.toString());
+                if (targetEpisodes.isEmpty()) throw new java.io.IOException("下一季暂无可播放集数");
+                if (!seasonPlayback.isCurrent(ticket)) return;
+                int first = 0;
+                for (int i = 0; i < targetEpisodes.size(); i++)
+                    if (targetEpisodes.get(i).num == season.firstEpisode) { first = i; break; }
+                Ep episode = targetEpisodes.get(first);
+                JSONObject model = Api.findVideoModel(api.videoModel(episode.vid), episode.vid);
+                if (model == null) throw new java.io.IOException("下一季取流失败");
+                TrackPicker.Track track = TrackPicker.pick(model, cap);
+                SeasonTarget target = new SeasonTarget();
+                target.season = season; target.episodes = targetEpisodes; target.definition = track.definition;
+                target.cap = cap; target.firstIndex = first;
+                synchronized (preparationLock) {
+                    if (!seasonPlayback.isCurrent(ticket) || cancellation.cancelled()) return;
+                    // The UI validates again before adopting this cache file. No player is created here.
+                    preparer.prepare(episode.vid, track.definition, track.mainUrl, track.spadeA,
+                            track.encrypted, cancellation, new EpisodePreparer.Listener() {
+                        @Override public void onProgress(String stage, int percent) {
+                            if (manual) ui.post(() -> {
+                                if (currentSeasonWork(ticket)) setStatus("第 " + season.number + " 季 · " + stage);
+                            });
+                        }
+                        @Override public void onDone(File file) {
+                            target.file = file;
+                            ui.post(() -> {
+                                if (!currentSeasonWork(ticket)) return;
+                                nextPreparing = false;
+                                nextError = "";
+                                if (manual) switchToSeason(target, ticket);
+                                else {
+                                    nextTarget = target;
+                                    if (seasonPlayback.ended()) continueAtSeasonEnd();
+                                }
+                            });
+                        }
+                        @Override public void onError(String message) { seasonTargetFailed(ticket, manual, season); }
+                    });
+                }
+            } catch (Exception error) { seasonTargetFailed(ticket, manual, season); }
+        }, manual ? "season-switch" : "season-prefetch").start();
+    }
+
+    private void seasonTargetFailed(SeasonPlaybackCoordinator.Ticket ticket, boolean manual,
+                                    SeasonRepository.Season season) {
+        ui.post(() -> {
+            if (!currentSeasonWork(ticket)) return;
+            nextPreparing = false;
+            switchingSeason = false;
+            nextError = "下一季暂时加载失败，可在全部季中重试";
+            retrySeason = season;
+            if (manual || seasonPlayback.ended()) {
+                setStatus(nextError);
+                showOverlay();
+            }
+        });
+    }
+
+    private void continueAtSeasonEnd() {
+        if (!seasonPlayback.canContinue(seasonPlayback.ticket(), seriesId, playbackIdentity,
+                foreground && playbackUiActive() && samePlaybackAccount(), autoplay) || switchingSeason) return;
+        if (seasonOverview == null || !seriesId.equals(seasonOverview.seriesId)) {
+            setStatus(overviewError.isEmpty() ? "本季播放完毕 · 正在查找下一季…" : overviewError);
+            if (overviewError.isEmpty()) loadSeasonOverview(false, false);
+        } else if (seasonOverview.next == null) {
+            seasonPlayback.consumed();
+            setStatus("全部季已播放完毕");
+            showOverlay();
+        } else if (!nextError.isEmpty()) {
+            setStatus(nextError);
+            showOverlay();
+        } else if (nextTarget != null && nextTarget.cap == CAPS[capIndex]
+                && seasonOverview.next.series.seriesId.equals(nextTarget.season.series.seriesId)) {
+            switchToSeason(nextTarget, seasonPlayback.ticket());
+        } else {
+            setStatus("本季播放完毕 · 正在准备下一季…");
+            prepareNextSeason();
+        }
+    }
+
+    private void switchToSeason(SeasonTarget target, SeasonPlaybackCoordinator.Ticket ticket) {
+        if (!currentSeasonWork(ticket) || target.file == null || !target.file.isFile()) return;
+        // Save using the old season fields before replacing any progress or favorite ownership.
+        flushProgress();
+        ++loadGeneration;
+        ++favoriteGeneration;
+        if (episodePicker != null) { episodePicker.dismiss(); episodePicker = null; }
+        if (seasonPicker != null) { seasonPicker.dismiss(); seasonPicker = null; }
+        if (playbackMenu != null) { playbackMenu.dismiss(); playbackMenu = null; }
+        releasePlayer();
+        seriesId = target.season.series.seriesId;
+        seriesTitle = target.season.series.title;
+        seriesCover = target.season.series.cover == null ? "" : target.season.series.cover;
+        episodes.clear(); episodes.addAll(target.episodes);
+        index = target.firstIndex;
+        requestedStartPosition = 0;
+        updatePlaybackIntent(0);
+        actualDefinition = target.definition;
+        seasonPlayback.enter(seriesId, playbackIdentity);
+        seasonOverview = null; overviewError = ""; nextError = ""; nextTarget = null;
+        retrySeason = null;
+        overviewBusy = false; nextPreparing = false; switchingSeason = false;
+        favorited = false; favoriteKnown = false; favoriteBusy = false;
+        titleView.setText(seriesTitle + "  第 " + episodes.get(index).num + " 集");
+        timeView.setText(""); bar.setProgress(0);
+        updateQualityLabel(); updateFavoriteLabel(); updateSeasonLabel();
+        setStatus("第 " + target.season.number + " 季准备就绪");
+        startPlayback(target.file, episodes.get(index).num);
+        loadFavoriteState();
+        checkSeasonTail();
+    }
 
     // ------------------------------------------------------------ Control visibility
 
@@ -676,6 +1075,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
             previous.setOnCompletionListener(null);
             previous.setOnErrorListener(null);
             previous.setOnVideoSizeChangedListener(null);
+            previous.setOnSeekCompleteListener(null);
             previous.release();
         }
     }
@@ -740,7 +1140,9 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         final boolean target = !favorited;
         setStatus(target ? "正在加入收藏…" : "正在取消收藏…");
         Api.Series item=new Api.Series();item.seriesId=seriesId;item.title=seriesTitle;item.cover=seriesCover;item.episodeCount=episodes.size();
-        library.favorite(item,target,result->{if(!playbackUiActive())return;favoriteBusy=false;favoriteKnown=result.known;if(result.known)favorited=result.enabled;updateFavoriteLabel();setStatus(result.ok()?(result.enabled?"已加入追剧":"已取消追剧"):result.error);});
+        final int request = ++favoriteGeneration;
+        final String sid = seriesId;
+        library.favorite(item,target,result->postFavorite(request,sid,()->{favoriteBusy=false;favoriteKnown=result.known;if(result.known)favorited=result.enabled;updateFavoriteLabel();setStatus(result.ok()?(result.enabled?"已加入追剧":"已取消追剧"):result.error);}));
     }
 
     /** 读一次云端书架，确定当前剧是否已收藏。失败保持「收藏」文案（不谎报已收藏）。 */
@@ -748,13 +1150,23 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         cn.hongguo.tv.account.Account a = cn.hongguo.tv.account.Account.load(this);
         if (!a.loggedIn()) {
             favoriteKnown = true;
-            ui.post(this::updateFavoriteLabel);
+            favorited = false;
+            updateFavoriteLabel();
             return;
         }
         if(favoriteBusy)return;
         favoriteBusy=true;updateFavoriteLabel();
         Api.Series item=new Api.Series();item.seriesId=seriesId;
-        library.loadFavorite(item,result->{if(!playbackUiActive())return;favoriteBusy=false;favoriteKnown=result.known;if(result.known)favorited=result.enabled;updateFavoriteLabel();});
+        final int request = ++favoriteGeneration;
+        final String sid = seriesId;
+        library.loadFavorite(item,result->postFavorite(request,sid,()->{favoriteBusy=false;favoriteKnown=result.known;if(result.known)favorited=result.enabled;updateFavoriteLabel();}));
+    }
+
+    private void postFavorite(int request, String sid, Runnable action) {
+        ui.post(() -> {
+            if (request == favoriteGeneration && sid.equals(seriesId) && foreground
+                    && playbackUiActive() && samePlaybackAccount()) action.run();
+        });
     }
 
     private void updateFavoriteLabel() {
@@ -816,8 +1228,20 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     private void showPlaybackMenu(){
         if (!playbackUiActive()) return;
         if(playbackMenu!=null&&playbackMenu.isShowing())return;
-        String[] items={"选集 · 当前第 "+episodes.get(index).num+" 集","清晰度 · "+(actualDefinition.isEmpty()?CAP_NAMES[capIndex]:actualDefinition),"倍速 · "+trimSpeed()+"×","画面 · "+MODE_NAMES[aspectMode],autoplay?"关闭自动连播":"开启自动连播",favorited?"取消追剧":"加入追剧"};
-        playbackMenu=new android.app.AlertDialog.Builder(this).setTitle("播放设置").setItems(items,(d,which)->{switch(which){case 0:showEpisodePicker();break;case 1:cycleQuality();break;case 2:cycleSpeed();break;case 3:cycleAspect();break;case 4:autoplay=!autoplay;getPreferences(0).edit().putBoolean("autoplay",autoplay).apply();setStatus(autoplay?"自动连播已开启":"自动连播已关闭");break;case 5:toggleFavorite();break;}}).setNegativeButton("返回播放",null).show();
+        String[] items={"选集 · 当前第 "+episodes.get(index).num+" 集","全部季","清晰度 · "+(actualDefinition.isEmpty()?CAP_NAMES[capIndex]:actualDefinition),"倍速 · "+trimSpeed()+"×","画面 · "+MODE_NAMES[aspectMode],autoplay?"关闭自动连播":"开启自动连播",favorited?"取消追剧":"加入追剧"};
+        playbackMenu=new android.app.AlertDialog.Builder(this).setTitle("播放设置").setItems(items,(d,which)->{switch(which){case 0:showEpisodePicker();break;case 1:showSeasonPicker();break;case 2:cycleQuality();break;case 3:cycleSpeed();break;case 4:cycleAspect();break;case 5:toggleAutoplay();break;case 6:toggleFavorite();break;}}).setNegativeButton("返回播放",null).show();
+    }
+
+    private void toggleAutoplay() {
+        autoplay = !autoplay;
+        getPreferences(0).edit().putBoolean("autoplay", autoplay).apply();
+        if (!autoplay) {
+            cancelSeasonWork();
+            // Disabling continuation must still allow the current episode's natural end UI.
+            try { if (prepared && player != null && player.isPlaying() && !userPaused && !seeking)
+                seasonPlayback.armCompletion(); } catch (IllegalStateException ignored) { }
+        } else checkSeasonTail();
+        setStatus(autoplay ? "自动连播已开启" : "自动连播已关闭");
     }
     private void showEpisodePicker(){
         if (!playbackUiActive() || episodePicker != null && episodePicker.isShowing()) return;
@@ -830,13 +1254,20 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
             return;
         }
         try {
+            cancelSeasonWork();
             if (player.isPlaying()) {
+                playbackWanted = false;
+                userPaused = true;
                 player.pause();
                 setStatus("已暂停");
                 flushProgress();
             } else {
+                playbackWanted = true;
+                userPaused = false;
                 player.start();
+                seasonPlayback.armCompletion();
                 setStatus("播放中");
+                checkSeasonTail();
             }
         } catch (Throwable e) {
             Log.w(TAG, "暂停切换失败", e);
@@ -848,6 +1279,9 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
             return;
         }
         try {
+            cancelSeasonWork();
+            seeking = true;
+            armAfterSeekAdvance = false;
             int pos = player.getCurrentPosition();
             int dur = player.getDuration();
             int target = Math.max(0, Math.min(dur, pos + deltaMs));
@@ -882,13 +1316,79 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
+        cancelSeasonWork();
     }
 
     // ------------------------------------------------------------ 生命周期
 
+    private String serializedEpisodes() {
+        JSONArray items = new JSONArray();
+        for (Ep episode : episodes) {
+            JSONObject item = new JSONObject();
+            try {
+                item.put("vid", episode.vid); item.put("num", episode.num); item.put("title", episode.title);
+                items.put(item);
+            } catch (org.json.JSONException error) { throw new IllegalStateException("集列表保存失败"); }
+        }
+        return items.toString();
+    }
+
+    private long currentPlaybackPosition() {
+        try { if (player != null && prepared) return Math.max(0, player.getCurrentPosition()); }
+        catch (IllegalStateException ignored) { }
+        if (requestedStartPosition >= 0) return requestedStartPosition;
+        if (progress != null && !episodes.isEmpty() && progress.episode(seriesId) == episodes.get(index).num)
+            return progress.position(seriesId);
+        return 0;
+    }
+
+    private void updatePlaybackIntent(long position) {
+        Intent current = new Intent(getIntent());
+        current.putExtra(EXTRA_SERIES_ID, seriesId).putExtra(EXTRA_TITLE, seriesTitle)
+                .putExtra(EXTRA_COVER, seriesCover).putExtra(EXTRA_EPISODES, serializedEpisodes())
+                .putExtra(EXTRA_START_INDEX, index).putExtra(STATE_POSITION, Math.max(0, position))
+                .putExtra(STATE_IDENTITY, playbackIdentity);
+        setIntent(current);
+    }
+
+    private void restorePlaybackIntent(Bundle state) {
+        Intent current = new Intent(getIntent());
+        current.putExtra(EXTRA_SERIES_ID, state.getString(EXTRA_SERIES_ID))
+                .putExtra(EXTRA_TITLE, state.getString(EXTRA_TITLE))
+                .putExtra(EXTRA_COVER, state.getString(EXTRA_COVER))
+                .putExtra(EXTRA_EPISODES, state.getString(EXTRA_EPISODES))
+                .putExtra(EXTRA_START_INDEX, state.getInt(EXTRA_START_INDEX))
+                .putExtra(STATE_POSITION, state.getLong(STATE_POSITION))
+                .putExtra(STATE_IDENTITY, state.getString(STATE_IDENTITY));
+        setIntent(current);
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        if (episodes.isEmpty() || !samePlaybackAccount()) return;
+        long position = currentPlaybackPosition();
+        updatePlaybackIntent(position);
+        state.putString(EXTRA_SERIES_ID, seriesId); state.putString(EXTRA_TITLE, seriesTitle);
+        state.putString(EXTRA_COVER, seriesCover); state.putString(EXTRA_EPISODES, serializedEpisodes());
+        state.putInt(EXTRA_START_INDEX, index); state.putLong(STATE_POSITION, position);
+        state.putString(STATE_IDENTITY, playbackIdentity);
+        state.putInt("player_quality", capIndex); state.putInt("player_speed", speedIndex);
+        state.putInt("player_aspect", aspectMode); state.putBoolean("player_autoplay", autoplay);
+        state.putBoolean("player_wanted", playbackWanted);
+    }
+
     @Override
     protected void onPause() {
         foreground=false;
+        cancelEpisodePreparation();
+        cancelSeasonWork();
+        userPaused = true;
+        seeking = false;
+        armAfterSeekAdvance = false;
+        ++favoriteGeneration;
+        if (favoriteBusy) favoriteKnown = false;
+        favoriteBusy = false;
+        if (!prepared) ++loadGeneration;
         super.onPause();
         flushProgress();
         ui.removeCallbacks(saveTick);
@@ -899,6 +1399,8 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 player.pause();
             } catch (Throwable ignored) {
             }
+        } else if (player != null) {
+            releasePlayer();
         }
     }
 
@@ -906,31 +1408,44 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     protected void onResume() {
         super.onResume();
         foreground=true;
-        if(library!=null&&!playbackOwner.equals(library.owner())){finish();return;}
+        if(library!=null&&!samePlaybackAccount()){finish();return;}
         ui.removeCallbacks(saveTick);
         ui.postDelayed(saveTick, SAVE_INTERVAL_MS);
-        if (player != null && prepared) startTicker();
+        if (player != null && prepared) {
+            startTicker();
+        } else if (!episodes.isEmpty() && status != null) play(index);
+        checkSeasonTail();
+        if (!favoriteKnown) loadFavoriteState();
     }
 
     @Override
     protected void onDestroy() {
         loadGeneration++;
+        cancelEpisodePreparation();
+        ++favoriteGeneration;
+        cancelSeasonWork();
         foreground = false;
         flushProgress();
         ui.removeCallbacksAndMessages(null);
         if (overlay != null) overlay.animate().cancel();
         if (playbackMenu != null) playbackMenu.dismiss();
         if (episodePicker != null) episodePicker.dismiss();
+        if (seasonPicker != null) seasonPicker.dismiss();
         releasePlayer();
-        if (cache != null) new Thread(() -> cache.trim(), "cache-trim").start();
+        if (cache != null) new Thread(() -> { synchronized (preparationLock) { cache.trim(); } }, "cache-trim").start();
         super.onDestroy();
     }
 
     // ------------------------------------------------------------ 入参
 
     private void parseEpisodes(String json) {
+        episodes.addAll(readEpisodes(json));
+    }
+
+    private static List<Ep> readEpisodes(String json) {
+        List<Ep> parsed = new ArrayList<>();
         if (json == null) {
-            return;
+            return parsed;
         }
         try {
             JSONArray arr = new JSONArray(json);
@@ -944,12 +1459,13 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 e.num = o.optInt("num", i + 1);
                 e.title = o.optString("title");
                 if (!e.vid.isEmpty()) {
-                    episodes.add(e);
+                    parsed.add(e);
                 }
             }
         } catch (Exception e) {
             Log.e(TAG, "集列表解析失败", e);
         }
+        return parsed;
     }
 
     /** 集号 → 列表下标。找不到返回 0。 */

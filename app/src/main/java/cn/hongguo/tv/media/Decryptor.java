@@ -59,7 +59,14 @@ public final class Decryptor {
      * @param key       16 字节 content key
      */
     public static Result decrypt(File encrypted, File out, byte[] key) throws Exception {
-        byte[] data = readAll(encrypted);
+        return decrypt(encrypted, out, key, new PreparationCancellation());
+    }
+
+    public static Result decrypt(File encrypted, File out, byte[] key,
+                                 PreparationCancellation cancellation) throws Exception {
+        cancellation.check();
+        byte[] data = readAll(encrypted, cancellation);
+        cancellation.check();
 
         // 逐 trak 处理：视频与音频各用自身的 senc base_iv。
         List<Box> traks = findAll(data, 0, data.length, "trak");
@@ -68,6 +75,7 @@ public final class Decryptor {
         String videoCodec = "";
 
         for (Box trak : traks) {
+            cancellation.check();
             String handler = findHandler(data, trak);
             if (!"vide".equals(handler) && !"soun".equals(handler)) {
                 continue;
@@ -81,7 +89,7 @@ public final class Decryptor {
                 continue;
             }
             long baseIv = readBaseIv(data, senc);
-            int n = decryptTrack(data, key, baseIv, st);
+            int n = decryptTrack(data, key, baseIv, st, cancellation);
             if ("vide".equals(handler)) {
                 videoSamples = n;
                 videoCodec = readVideoCodec(data, trak);
@@ -96,8 +104,9 @@ public final class Decryptor {
 
         // 清信令：不删掉 encv/senc/saiz/saio 的话，严格播放器会判定为加密文件而拒绝播放。
         stripEncryptionSignaling(data, videoCodec);
-
-        writeAll(out, data);
+        cancellation.check();
+        writeAll(out, data, cancellation);
+        cancellation.check();
         Log.i(TAG, "解密完成 视频=" + videoSamples + " 音频=" + audioSamples
                 + " codec=" + videoCodec
                 + " 输入=" + encrypted.length() + " 输出=" + out.length());
@@ -106,10 +115,12 @@ public final class Decryptor {
 
     // ---------------------------------------------------------------- 解密核心
 
-    private static int decryptTrack(byte[] data, byte[] key, long baseIv, SampleTable st) {
+    private static int decryptTrack(byte[] data, byte[] key, long baseIv, SampleTable st,
+                                    PreparationCancellation cancellation) throws java.io.InterruptedIOException {
         SecretKeySpec k = new SecretKeySpec(key, "AES");
         int ok = 0;
         for (int i = 0; i < st.sizes.length; i++) {
+            cancellation.check();
             int off = st.offsets[i];
             int size = st.sizes[i];
             if (off < 0 || size <= 0 || off + size > data.length) {
@@ -676,22 +687,28 @@ public final class Decryptor {
         return new String(d, p, 4, StandardCharsets.US_ASCII);
     }
 
-    private static byte[] readAll(File f) throws IOException {
+    private static byte[] readAll(File f, PreparationCancellation cancellation) throws IOException {
         long len = f.length();
         if (len <= 0 || len > 512L * 1024 * 1024) {
             throw new IOException("文件大小异常");
         }
         byte[] d = new byte[(int) len];
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
-            raf.readFully(d);
+            for (int offset = 0; offset < d.length; offset += 65536) {
+                cancellation.check();
+                raf.readFully(d, offset, Math.min(65536, d.length - offset));
+            }
         }
         return d;
     }
 
-    private static void writeAll(File f, byte[] d) throws IOException {
+    private static void writeAll(File f, byte[] d, PreparationCancellation cancellation) throws IOException {
         try (RandomAccessFile raf = new RandomAccessFile(f, "rw")) {
             raf.setLength(0);
-            raf.write(d);
+            for (int offset = 0; offset < d.length; offset += 65536) {
+                cancellation.check();
+                raf.write(d, offset, Math.min(65536, d.length - offset));
+            }
         }
     }
 }

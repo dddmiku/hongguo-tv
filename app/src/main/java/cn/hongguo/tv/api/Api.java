@@ -173,10 +173,8 @@ public final class Api {
         if (!r.ok()) {
             throw new IOException("接口无响应（HTTP " + r.code + "）");
         }
-        // 诊断用：上游异常时 body 往往是简短错误 JSON，打出来才能判断是
-        // 参数问题还是签名问题（签名错时 body 为空，参数错时带 message）。
-        Log.d(TAG, path + " raw=" + (r.body == null ? "null"
-                : r.body.length() > 600 ? r.body.substring(0, 600) + "..." : r.body));
+        // 只记录结构诊断，原始响应可能包含带签名的取流地址。
+        Log.d(TAG, path + " HTTP=" + r.code + " bytes=" + (r.body == null ? 0 : r.body.length()));
         try {
             return new JSONObject(r.body);
         } catch (Exception e) {
@@ -584,6 +582,34 @@ public final class Api {
         q.put("count", "0");
         q.put("use_correct", "true");
         return get("/reading/bookapi/search/tab/v", q);
+    }
+
+    /** 季发现用的有界搜索，搜索结果仅作为待核对官方详情的候选。 */
+    public List<Series> seasonSearch(String query) throws IOException {
+        return SeasonSearch.find(query, q -> get("/reading/bookapi/search/tab/v", q));
+    }
+
+    /** 官方季身份；批量响应可省略集列表，匹配成员由仓库补单剧详情。 */
+    public Map<String, SeasonMatcher.Metadata> seasonDetails(List<String> seriesIds) throws IOException {
+        Map<String, SeasonMatcher.Metadata> out = new LinkedHashMap<>();
+        if (seriesIds == null) throw SeasonMatcher.unavailable();
+        List<String> ids = new ArrayList<>(); java.util.Set<String> seen = new java.util.HashSet<>();
+        for (String id : seriesIds) {
+            if (!SeasonMatcher.validId(id)) throw SeasonMatcher.unavailable();
+            if (seen.add(id)) ids.add(id);
+        }
+        for (int start = 0; start < ids.size(); start += META_BATCH) {
+            List<String> batch = ids.subList(start, Math.min(start + META_BATCH, ids.size()));
+            JSONObject raw = post("/novel/player/multi_video_detail/v1/", episodesBody(join(batch)));
+            JSONObject data = raw.optJSONObject("data");
+            if (raw.optInt("code", 0) != 0 || data == null) throw SeasonMatcher.unavailable();
+            for (String sid : batch) {
+                JSONObject entry = data.optJSONObject(sid);
+                JSONObject video = entry == null ? null : entry.optJSONObject("video_data");
+                out.put(sid, SeasonMatcher.Metadata.fromIdentity(sid, video));
+            }
+        }
+        return out;
     }
     /**
      * 剧集列表。

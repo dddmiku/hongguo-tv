@@ -34,5 +34,5 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '7.6.4'
-      - name: Build isolated QA app and tests
-        run: gradle --console=plain :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Test contracts and build isolated QA app
+        run: gradle --console=plain :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest

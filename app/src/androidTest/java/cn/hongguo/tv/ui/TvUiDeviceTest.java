@@ -68,7 +68,7 @@ public class TvUiDeviceTest extends InstrumentationTestCase {
         WatchRecord saved=HistoryStore.get(getInstrumentation().getTargetContext()).find("local",sid);assertNotNull(saved);assertEquals(1,saved.episode);assertTrue(saved.position>1000);assertTrue(saved.position<15000);assertEquals(episodes.getJSONObject(0).getString("vid"),saved.vid);assertFalse(saved.pending);
         assertEquals(saved.position,new cn.hongguo.tv.cache.PlayProgress(getInstrumentation().getTargetContext()).resumeAt(sid,1,179420));
         key(KeyEvent.KEYCODE_DPAD_UP);java.lang.reflect.Field menuField=PlayerActivity.class.getDeclaredField("playbackMenu");menuField.setAccessible(true);
-        assertTrue(main(()->{try{android.app.AlertDialog menu=(android.app.AlertDialog)menuField.get(activity);return menu!=null&&menu.isShowing()&&menu.getListView().getCount()==6;}catch(Exception e){return false;}}));key(KeyEvent.KEYCODE_BACK);
+        assertTrue(main(()->{try{android.app.AlertDialog menu=(android.app.AlertDialog)menuField.get(activity);return menu!=null&&menu.isShowing()&&menu.getListView().getCount()==7&&"全部季".equals(menu.getListView().getAdapter().getItem(1));}catch(Exception e){return false;}}));key(KeyEvent.KEYCODE_BACK);
         main(()->{activity.finish();return null;});activity=null;
         Intent resume=PlayerActivity.intent(getInstrumentation().getTargetContext(),sid,"人前小保姆，人后是亲妈","",episodes.toString());open(PlayerActivity.class,resume);
         waitFor("再次打开没有精确续播",()->{try{MediaPlayer p=(MediaPlayer)field.get(activity);return p!=null&&p.isPlaying()&&p.getCurrentPosition()>=saved.position;}catch(Exception e){return false;}},60000);

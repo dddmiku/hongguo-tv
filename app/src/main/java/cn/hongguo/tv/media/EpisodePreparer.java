@@ -52,18 +52,26 @@ public final class EpisodePreparer {
      */
     public void prepare(String vid, String definition, String url, String spadeA,
                         boolean encrypted, Listener l) {
-        File plain = cache.plainFile(vid, definition);
-        if (plain.isFile() && plain.length() > 0) {
-            Log.i(TAG, "命中缓存 " + plain.getName());
-            l.onProgress("已缓存", 100);
-            l.onDone(plain);
-            return;
-        }
+        prepare(vid, definition, url, spadeA, encrypted, new PreparationCancellation(), l);
+    }
 
+    /** Compatible preparation with explicit cancellation for obsolete loads and season prefetch. */
+    public void prepare(String vid, String definition, String url, String spadeA,
+                        boolean encrypted, PreparationCancellation cancellation, Listener l) {
+        File plain = cache.plainFile(vid, definition);
         File cipher = cache.cipherFile(vid, definition);
+        File staged = new File(plain.getPath() + ".part");
         try {
+            cancellation.bindWorker();
+            if (plain.isFile() && plain.length() > 0) {
+                l.onProgress("已缓存", 100);
+                cancellation.check();
+                l.onDone(plain);
+                return;
+            }
             l.onProgress("下载中", 0);
-            long total = download(url, cipher, pct -> l.onProgress("下载中", pct));
+            long total = download(url, cipher, pct -> l.onProgress("下载中", pct), cancellation);
+            cancellation.check();
             Log.i(TAG, "下载完成 " + total / 1024 + "KB");
             if (total <= 0) {
                 l.onError("下载失败");
@@ -71,43 +79,49 @@ public final class EpisodePreparer {
             }
 
             if (!encrypted) {
-                if (!cipher.renameTo(plain)) {
-                    copy(cipher, plain);
+                if (!cipher.renameTo(staged)) {
+                    copy(cipher, staged, cancellation);
                 }
-                cipher.delete();
+                cancellation.check();
+                publish(staged, plain, cancellation);
+                cancellation.check();
                 l.onDone(plain);
                 return;
             }
 
             l.onProgress("解密中", 90);
             byte[] key = Spade.contentKey(spadeA);
+            cancellation.check();
             if (key == null) {
                 l.onError("密钥解析失败");
                 return;
             }
-            Decryptor.Result r = Decryptor.decrypt(cipher, plain, key);
-            cipher.delete();
+            Decryptor.Result r = Decryptor.decrypt(cipher, staged, key, cancellation);
+            cancellation.check();
             Log.i(TAG, "解密完成 视频=" + r.videoSamples + " 音频=" + r.audioSamples);
             if (r.videoSamples <= 0) {
                 l.onError("解密后无视频");
                 return;
             }
+            publish(staged, plain, cancellation);
             l.onProgress("就绪", 100);
+            cancellation.check();
             l.onDone(plain);
         } catch (Throwable e) {
-            Log.e(TAG, "准备失败", e);
+            if (!cancellation.cancelled() && !Thread.currentThread().isInterrupted()) {
+                Log.w(TAG, "准备失败类型=" + e.getClass().getSimpleName());
+                l.onError("视频暂时加载失败，请稍后重试");
+            }
+        } finally {
             cipher.delete();
-            l.onError(friendly(e));
+            staged.delete();
+            cancellation.finished();
         }
     }
 
-    /** 把异常翻译成用户能看懂的一句话。 */
-    private static String friendly(Throwable e) {
-        String m = e.getMessage();
-        if (m == null || m.isEmpty()) {
-            return "加载失败";
-        }
-        return m;
+    private static void publish(File staged, File plain, PreparationCancellation cancellation) throws Exception {
+        cancellation.check();
+        if (!staged.renameTo(plain)) throw new java.io.IOException("缓存提交失败");
     }
 
     private interface Pct {
@@ -115,21 +129,27 @@ public final class EpisodePreparer {
     }
 
     /** 下载到文件，按字节数回报百分比（总长未知时只报 0）。 */
-    private static long download(String url, File dst, Pct pct) throws Exception {
+    private static long download(String url, File dst, Pct pct, PreparationCancellation cancellation) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setConnectTimeout(15000);
         c.setReadTimeout(60000);
         c.setRequestProperty("User-Agent", "Mozilla/5.0");
         // 必须整集下载：moov 里的样本偏移是相对完整文件的，
         // 只取前面一部分会让大量样本越界、解出来只剩开头几帧。
-        long total = c.getContentLength();
+        cancellation.bindConnection(c);
         long done = 0;
         int last = -1;
-        try (InputStream in = c.getInputStream();
-             OutputStream out = new FileOutputStream(dst)) {
+        try {
+          cancellation.check();
+          long total = c.getContentLength();
+          cancellation.check();
+          try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(dst)) {
             byte[] buf = new byte[65536];
-            int n;
-            while ((n = in.read(buf)) != -1) {
+            while (true) {
+                cancellation.check();
+                int n = in.read(buf);
+                if (n == -1) break;
+                cancellation.check();
                 out.write(buf, 0, n);
                 done += n;
                 if (total > 0) {
@@ -140,18 +160,24 @@ public final class EpisodePreparer {
                     }
                 }
             }
+          }
+          cancellation.check();
         } finally {
             c.disconnect();
+            cancellation.clearConnection(c);
         }
         return done;
     }
 
-    private static void copy(File from, File to) throws Exception {
+    private static void copy(File from, File to, PreparationCancellation cancellation) throws Exception {
         try (InputStream in = new java.io.FileInputStream(from);
              OutputStream out = new FileOutputStream(to)) {
             byte[] buf = new byte[65536];
-            int n;
-            while ((n = in.read(buf)) != -1) {
+            while (true) {
+                cancellation.check();
+                int n = in.read(buf);
+                if (n == -1) break;
+                cancellation.check();
                 out.write(buf, 0, n);
             }
         }
