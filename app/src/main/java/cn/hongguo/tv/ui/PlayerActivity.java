@@ -445,8 +445,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 String bucket = t.definition;
                 synchronized (preparationLock) {
                 if (request != loadGeneration || cancellation.cancelled()) return;
-                preparer.prepare(ep.vid, bucket, t.mainUrl, t.spadeA,
-                        t.encrypted, cancellation, new EpisodePreparer.Listener() {
+                preparer.prepare(ep.vid, t, cancellation, new EpisodePreparer.Listener() {
                             @Override
                             public void onProgress(String stage, int pct) {
                                 postLoad(request, () -> setStatus("第 " + ep.num + " 集 "
@@ -462,7 +461,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                             public void onError(String message) {
                                 postLoad(request, () -> fail(message));
                             }
-                        });
+                        }, () -> TrackPicker.pick(Api.findVideoModel(api.videoModel(ep.vid),ep.vid),cap));
                 }
             } catch (Throwable e) {
                 Log.e(TAG, "取流异常", e);
@@ -924,8 +923,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 synchronized (preparationLock) {
                     if (!seasonPlayback.isCurrent(ticket) || cancellation.cancelled()) return;
                     // The UI validates again before adopting this cache file. No player is created here.
-                    preparer.prepare(episode.vid, track.definition, track.mainUrl, track.spadeA,
-                            track.encrypted, cancellation, new EpisodePreparer.Listener() {
+                    preparer.prepare(episode.vid, track, cancellation, new EpisodePreparer.Listener() {
                         @Override public void onProgress(String stage, int percent) {
                             if (manual) ui.post(() -> {
                                 if (currentSeasonWork(ticket)) setStatus("第 " + season.number + " 季 · " + stage);
@@ -945,7 +943,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                             });
                         }
                         @Override public void onError(String message) { seasonTargetFailed(ticket, manual, season); }
-                    });
+                    }, () -> TrackPicker.pick(Api.findVideoModel(api.videoModel(episode.vid),episode.vid),cap));
                 }
             } catch (Exception error) { seasonTargetFailed(ticket, manual, season); }
         }, manual ? "season-switch" : "season-prefetch").start();

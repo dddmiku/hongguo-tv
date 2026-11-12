@@ -37,13 +37,13 @@ android {
         // + 内置数字键盘（遥控器直接输手机号/验证码）+ Accept-Encoding 参与签名
         // 1.0.9：数字键盘改为按需弹出（聚焦输入框/点「输入号码」才显示，
         // 焦点离开自动收起，另有显式「收起」按钮）
-        versionCode 16
-        versionName "1.3.0"
+        versionCode 17
+        versionName "1.3.1"
 
 
         ndk {
             // 只打 arm 架构：电视/盒子全是 ARM，x86 模拟器不支持签名 so。
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
+            abiFilters 'arm64-v8a'
         }
     }
 

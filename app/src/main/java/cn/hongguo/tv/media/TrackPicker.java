@@ -46,6 +46,7 @@ public final class TrackPicker {
         public final long size;
         public final String mainUrl;
         public final String backupUrl;
+        public final java.util.List<String> urls;
         public final String spadeA;
         public final boolean encrypted;
 
@@ -59,6 +60,13 @@ public final class TrackPicker {
             this.size = size;
             this.mainUrl = mainUrl;
             this.backupUrl = backupUrl;
+            java.util.LinkedHashSet<String> alternatives = new java.util.LinkedHashSet<>();
+            if (!mainUrl.isEmpty()) alternatives.add(mainUrl);
+            for (String field : new String[]{"backup_url", "backup_url_1", "backup_url_2", "backup_url_3"}) {
+                String value = decodeUrl(raw.optString(field,""));
+                if (!value.isEmpty()) alternatives.add(value);
+            }
+            this.urls = new java.util.ArrayList<>(alternatives);
             this.spadeA = spadeA;
             this.encrypted = encrypted;
         }
@@ -148,7 +156,8 @@ public final class TrackPicker {
                                int w, int h, long size) {
         JSONObject enc = t.optJSONObject("encrypt_info");
         String spade = enc == null ? "" : enc.optString("spade_a", "");
-        boolean encrypted = enc != null && enc.optBoolean("encrypt", false);
+        boolean encrypted = enc != null ? enc.optBoolean("encrypt", false) : t.optBoolean("encrypt", false);
+        if (enc == null) spade = t.optString("spade_a", "");
         String main = decodeUrl(t.optString("main_url", ""));
         String backup = decodeUrl(t.optString("backup_url_1",
                 t.optString("backup_url", "")));

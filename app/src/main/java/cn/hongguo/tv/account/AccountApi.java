@@ -415,7 +415,7 @@ public final class AccountApi {
         h.put("x-vc-bdturing-sdk-version", "4.0.3.cn");
         h.put("x-ss-req-ticket", String.valueOf(System.currentTimeMillis()));
         // 必须是随机值。上游文档写「body 的 MD5」，实测那样会被拦。
-        h.put("x-ss-stub", randomHex(32));
+        h.put("x-ss-stub", ContentBody.digest(sb.toString().getBytes("UTF-8")));
         // Accept-Encoding 必须在**签名之前**定下来。
         //
         // Http.post 对每个请求都会强制写 `Accept-Encoding: identity`，
@@ -443,7 +443,7 @@ public final class AccountApi {
         // 值互相错位（见构造函数注释）。修好后本机 so 完全能通过护照校验
         // （实测 2026-11-04 真机：send_code 返回 200 + mobile_ticket）。
         // 远程路径已移除 —— TV 端必须独立可用。
-        h.putAll(signer.sign(url, h));
+        h.putAll(signer.sign(url, h, sb.toString().getBytes("UTF-8")));
         // 护照请求不带这几个（真机没有）。签名器会补上，必须在签名后删。
         //
         // 注意 X-Neptune / X-Soter：桌面端因为「真机抓包里没有」而删掉，
@@ -466,28 +466,6 @@ public final class AccountApi {
                 + " keys=" + form.keySet());
 
         Http.Response r = Http.post(url, h, sb.toString().getBytes("UTF-8"), null);
-        // 把失败时的完整请求落盘，供离线复现（默认只在调试构建里写）。
-        // 只写 DEBUG 构建：release 包不留凭据形态的东西。
-        if (!ok0(r.body)) {
-            try {
-                java.io.File dir = new java.io.File(context.getCacheDir(), "diag");
-                if (dir.isDirectory() || dir.mkdirs()) {
-                    java.io.File f = new java.io.File(dir, "last_passport_request.txt");
-                    StringBuilder dump = new StringBuilder();
-                    dump.append("URL ").append(url).append('\n');
-                    for (Map.Entry<String, String> e : h.entrySet()) {
-                        dump.append("H ").append(e.getKey()).append(": ")
-                                .append(e.getValue()).append('\n');
-                    }
-                    dump.append("BODY ").append(sb).append('\n');
-                    java.io.FileOutputStream fo = new java.io.FileOutputStream(f);
-                    fo.write(dump.toString().getBytes("UTF-8"));
-                    fo.close();
-                    Log.i(TAG, "失败请求已落盘: " + f.getAbsolutePath());
-                }
-            } catch (Throwable ignored) {
-            }
-        }
         // 从**本次响应**合并进登录态。
         //
         // 这里不能再从 Account.load(context).cookie 起手：上面已经决定
@@ -541,7 +519,7 @@ public final class AccountApi {
         ContentBody requestBody=new ContentBody(body);
         h.put("content-encoding","gzip");
         h.put("x-ss-stub",requestBody.digest);
-        h.putAll(signer.sign(url, h));
+        h.putAll(signer.sign(url, h, requestBody.bytes));
         Http.Response r = Http.post(url, h, requestBody.bytes, null);
         if (!r.ok()) {
             throw new IOException("接口无响应（HTTP " + r.code + "）");
@@ -573,14 +551,15 @@ public final class AccountApi {
         Map<String, String> q = new LinkedHashMap<>();
         q.put("aid", "8662");
         q.put("app_name", "novelread");
-        q.put("version_code", "72232");
-        q.put("version_name", "7.2.2.32");
-        q.put("channel", "audit");
+        q.put("version_code", "74332");
+        q.put("version_name", "7.4.3.32");
+        q.put("channel", "vivo_8662_64");
         q.put("device_platform", "android");
         q.put("device_type", "PGT-AN10");
         q.put("os_version", "12");
-        q.put("update_version_code", "72232");
+        q.put("update_version_code", "74332");
         q.put("iid", iid);
+        q.put("device_id", deviceId);
         q.put("cdid", cdid);
         if (extra != null) {
             q.putAll(extra);

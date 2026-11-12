@@ -276,7 +276,7 @@ public class PlayerLifecycleDeviceTest extends InstrumentationTestCase {
 
         LoadFailure(String message) { this.message = message; }
 
-        @Override public void sign(String url, Map<String, String> headers) throws IOException {
+        @Override public void sign(String url, Map<String, String> headers, byte[] body) throws IOException {
             Thread worker = Thread.currentThread();
             if (!"episode-load".equals(worker.getName())) throw new IOException("错误的取流线程");
             worker.setUncaughtExceptionHandler((t, failure) -> uncaught.set(failure));

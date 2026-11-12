@@ -17,7 +17,7 @@ public final class SeasonPlayerFixtureActivity extends PlayerActivity {
             Api offline = new Api(this);
             Field signer = Api.class.getDeclaredField("signerAdapter");
             signer.setAccessible(true);
-            signer.set(offline, (Http.Signer) (url, headers) -> { throw new IOException("受控离线"); });
+            signer.set(offline, (Http.Signer) (url, headers, body) -> { throw new IOException("受控离线"); });
             Field api = PlayerActivity.class.getDeclaredField("api");
             api.setAccessible(true);
             api.set(this, offline);

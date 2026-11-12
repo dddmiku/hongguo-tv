@@ -26,7 +26,7 @@ def feed(tv_version, code, apk, notes):
         raise ValueError("TV 版本号不正确")
     if apk.name!="hongguo-tv-"+tv_version+".APK":raise ValueError("安装包名称与版本不一致")
     digest=hashlib.sha256(apk.read_bytes()).hexdigest()
-    platform={"version":tv_version,"versionCode":code,"url":"https://github.com/"+REPO+"/releases/download/v"+tv_version+"/"+apk.name,"size":apk.stat().st_size,"sha256":digest,"notes":notes}
+    platform={"version":tv_version,"versionCode":code,"url":"https://github.com/"+REPO+"/releases/download/v"+tv_version+"/"+apk.name,"size":apk.stat().st_size,"sha256":digest,"notes":notes,"supportedAbis":["arm64-v8a"]}
     return {"version":tv_version,"sha256":digest,"notes":notes,"repository":"https://github.com/"+REPO,"platforms":{"android-tv":platform}}
 
 def call(method,path,secret,**kwargs):

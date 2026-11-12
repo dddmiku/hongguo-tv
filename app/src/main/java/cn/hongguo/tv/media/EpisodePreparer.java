@@ -58,6 +58,30 @@ public final class EpisodePreparer {
     /** Compatible preparation with explicit cancellation for obsolete loads and season prefetch. */
     public void prepare(String vid, String definition, String url, String spadeA,
                         boolean encrypted, PreparationCancellation cancellation, Listener l) {
+        prepare(vid,definition,java.util.Collections.singletonList(url),spadeA,encrypted,cancellation,l);
+    }
+
+    public void prepare(String vid, TrackPicker.Track track, PreparationCancellation cancellation, Listener l) {
+        prepare(vid,track.definition,track.urls,track.spadeA,track.encrypted,cancellation,l);
+    }
+    public interface Refresh { TrackPicker.Track read() throws Exception; }
+    public void prepare(String vid, TrackPicker.Track track, PreparationCancellation cancellation, Listener l, Refresh refresh) {
+        prepare(vid,track,cancellation,new Listener(){
+            @Override public void onProgress(String stage,int pct){l.onProgress(stage,pct);}
+            @Override public void onDone(File plain){l.onDone(plain);}
+            @Override public void onError(String message){
+                try {
+                    cancellation.bindWorker();cancellation.check();
+                    l.onProgress("重新连接片源",0);
+                    TrackPicker.Track fresh=refresh.read();cancellation.check();
+                    prepare(vid,fresh,cancellation,l);
+                }catch(Exception error){if(!cancellation.cancelled()&&!Thread.currentThread().isInterrupted())l.onError("各播放线路暂时不可用，请重试当前集");}
+            }
+        });
+    }
+
+    private void prepare(String vid, String definition, java.util.List<String> urls, String spadeA,
+                        boolean encrypted, PreparationCancellation cancellation, Listener l) {
         File plain = cache.plainFile(vid, definition);
         File cipher = cache.cipherFile(vid, definition);
         File staged = new File(plain.getPath() + ".part");
@@ -70,7 +94,12 @@ public final class EpisodePreparer {
                 return;
             }
             l.onProgress("下载中", 0);
-            long total = download(url, cipher, pct -> l.onProgress("下载中", pct), cancellation);
+            long total = 0;
+            for (String url : urls) {
+                cancellation.check();
+                try { total = download(url, cipher, pct -> l.onProgress("下载中", pct), cancellation); if (total>0) break; }
+                catch (Exception error) { cancellation.check(); cipher.delete(); }
+            }
             cancellation.check();
             Log.i(TAG, "下载完成 " + total / 1024 + "KB");
             if (total <= 0) {
@@ -138,10 +167,13 @@ public final class EpisodePreparer {
         // 只取前面一部分会让大量样本越界、解出来只剩开头几帧。
         cancellation.bindConnection(c);
         long done = 0;
+        long total = -1;
         int last = -1;
         try {
           cancellation.check();
-          long total = c.getContentLength();
+          total = c.getContentLength();
+          int status = c.getResponseCode();
+          if (status != 200) throw new java.io.IOException("片源不可用");
           cancellation.check();
           try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(dst)) {
             byte[] buf = new byte[65536];
@@ -166,6 +198,7 @@ public final class EpisodePreparer {
             c.disconnect();
             cancellation.clearConnection(c);
         }
+        if (total > 0 && done != total) throw new java.io.IOException("片源下载不完整");
         return done;
     }
 

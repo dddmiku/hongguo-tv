@@ -15,10 +15,13 @@ public final class ContentBody {
         ByteArrayOutputStream buffer=new ByteArrayOutputStream();
         try(GZIPOutputStream gzip=new GZIPOutputStream(buffer)){gzip.write(value.toString().getBytes("UTF-8"));}
         bytes=buffer.toByteArray();
+        digest=digest(bytes);
+    }
+    public static String digest(byte[] bytes) throws IOException {
         try {
             StringBuilder hash=new StringBuilder();
             for(byte b:MessageDigest.getInstance("MD5").digest(bytes))hash.append(String.format(Locale.US,"%02X",b&255));
-            digest=hash.toString();
+            return hash.toString();
         }catch(java.security.NoSuchAlgorithmException e){throw new IOException("请求摘要无法生成",e);}
     }
 }

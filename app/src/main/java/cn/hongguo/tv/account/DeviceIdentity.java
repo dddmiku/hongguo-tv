@@ -23,7 +23,7 @@ import java.util.UUID;
  * 首次启动写入 SharedPreferences 固定下来。会话 id 每次请求必须一致
  * （真机就是这样），所以也要持久化，不能每次现生成。
  */
-final class DeviceIdentity {
+public final class DeviceIdentity {
 
     private static final String TAG = "HgDevice";
     private static final String PREFS = "hg_device";
@@ -51,7 +51,7 @@ final class DeviceIdentity {
      * 返回 {device_id, iid, cdid, normalSessionId, coldStartSessionId}。
      * 首次调用会把随包身份落到 SharedPreferences，之后一直沿用。
      */
-    static String[] load(Context ctx) {
+    public static String[] load(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String[] cached = read(sp);
         if (cached != null) {

@@ -76,7 +76,7 @@ public final class Http {
 
     /** 回调：拿到 URL 和已定头之后，由调用方补签名头。 */
     public interface Signer {
-        void sign(String url, Map<String, String> headers) throws IOException;
+        void sign(String url, Map<String, String> headers, byte[] body) throws IOException;
     }
 
     public static Response get(String url, Map<String, String> headers, Signer signer)
@@ -92,9 +92,10 @@ public final class Http {
     private static Response request(String method, String url, Map<String, String> baseHeaders,
                                     byte[] body, Signer signer) throws IOException {
         Map<String, String> headers = new LinkedHashMap<>(baseHeaders);
+        if (body != null) headers.put("x-ss-stub", cn.hongguo.tv.account.ContentBody.digest(body));
         if (signer != null) {
             // 签名要在 body 与所有头都确定之后做：签名输入包含它们。
-            signer.sign(url, headers);
+            signer.sign(url, headers, body);
         }
 
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
@@ -139,7 +140,7 @@ public final class Http {
             InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
             String text = in == null ? "" : readAll(in);
             if (code >= 400) {
-                Log.w(TAG, method + " " + url + " -> " + code + " " + head(text));
+                Log.w(TAG, method + " HTTP=" + code + " responseBytes=" + text.length());
             }
             return new Response(code, text, readSetCookies(conn));
         } finally {

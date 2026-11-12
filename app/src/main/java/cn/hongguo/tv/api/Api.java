@@ -52,8 +52,11 @@ public final class Api {
     private final Http.Signer signerAdapter;
     private final String iid;
     private final String cdid;
+    private final String deviceId;
+    private final Context context;
 
     public Api(Context context) {
+        this.context = context.getApplicationContext();
         this.signer = new RequestSigner(context);
         this.signerAdapter = this::signInto;
         SharedPreferences sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -75,6 +78,7 @@ public final class Api {
         }
         this.iid = iid;
         this.cdid = cdid;
+        this.deviceId = cn.hongguo.tv.account.DeviceIdentity.load(this.context)[0];
     }
 
     /** 读 assets/device.json，返回 {iid, cdid}；读不到或字段缺失返回 null。 */
@@ -103,8 +107,8 @@ public final class Api {
         }
     }
 
-    private void signInto(String url, Map<String, String> headers) throws IOException {
-        headers.putAll(signer.sign(url, headers));
+    private void signInto(String url, Map<String, String> headers, byte[] body) throws IOException {
+        headers.putAll(signer.sign(url, headers, body));
     }
 
     private static String digits(int n) {
@@ -120,15 +124,16 @@ public final class Api {
         Map<String, String> q = new LinkedHashMap<>();
         q.put("aid", "8662");
         q.put("app_name", "novelread");
-        q.put("version_code", "72232");
-        q.put("version_name", "7.2.2.32");
-        q.put("channel", "audit");
+        q.put("version_code", "74332");
+        q.put("version_name", "7.4.3.32");
+        q.put("channel", "vivo_8662_64");
         q.put("device_platform", "android");
         q.put("device_type", "PGT-AN10");
         q.put("os_version", "12");
-        q.put("update_version_code", "72232");
+        q.put("update_version_code", "74332");
         q.put("iid", iid);
         q.put("cdid", cdid);
+        q.put("device_id", deviceId);
         return q;
     }
 
@@ -136,6 +141,9 @@ public final class Api {
         Map<String, String> h = new LinkedHashMap<>();
         h.put("user-agent", UA);
         h.put("accept", "application/json");
+        cn.hongguo.tv.account.Account account = cn.hongguo.tv.account.Account.load(context);
+        if (!account.cookie.isEmpty()) h.put("cookie", account.cookie);
+        if (!account.token.isEmpty()) h.put("x-tt-token", account.token);
         if (json) {
             h.put("content-type", "application/json; charset=utf-8");
         }
@@ -183,8 +191,17 @@ public final class Api {
     }
 
     private JSONObject post(String path, String jsonBody) throws IOException {
-        Http.Response r = Http.post(url(path, null), headers(true),
-                jsonBody.getBytes("UTF-8"), signerAdapter);
+        Map<String,String> requestHeaders = headers(true);
+        byte[] bytes = jsonBody.getBytes("UTF-8");
+        if (path.startsWith("/novel/player/")) {
+            try {
+                cn.hongguo.tv.account.ContentBody body = new cn.hongguo.tv.account.ContentBody(new JSONObject(jsonBody));
+                bytes = body.bytes;
+                requestHeaders.put("content-encoding", "gzip");
+                requestHeaders.put("x-ss-stub", body.digest);
+            } catch (org.json.JSONException error) { throw new IOException("请求格式异常"); }
+        }
+        Http.Response r = Http.post(url(path, null), requestHeaders, bytes, signerAdapter);
         if (!r.ok()) {
             throw new IOException("接口无响应（HTTP " + r.code + "）");
         }
@@ -815,6 +832,11 @@ public final class Api {
      * 换成已注册身份后立刻回 5 档（360p~1080p，全 bytevc1）。
      */
     public JSONObject videoModel(String vid) throws IOException {
+        JSONObject modern = multiVideoModel(vid);
+        int code = modern.optInt("code", 0);
+        if (code==401||code==403||code==8||code==1001) throw new IOException("手机登录态已失效，请重新登录后播放");
+        if (code==110001||code==100001||code==100002) throw new IOException("手机播放暂时受限，请稍后重试");
+        if (findVideoModel(modern, vid) != null) return modern;
         Map<String, String> q = new LinkedHashMap<>();
         q.put("video_id", vid);
         q.put("need_all_video_definition", "1");
@@ -844,11 +866,12 @@ public final class Api {
             biz.put("use_server_dns", false);
             biz.put("video_platform", 1024);
             org.json.JSONObject map = new org.json.JSONObject();
-            map.put("1", new org.json.JSONArray().put(vid));
+            map.put("1004", new org.json.JSONArray().put(vid));
             org.json.JSONObject body = new org.json.JSONObject();
             body.put("biz_param", biz);
             body.put("mixed_video_id_map", map);
-            JSONObject j = post("/novel/player/multi_video_model/v1/", body.toString());
+            body.put("dr_scene", "player");
+            JSONObject j = post("/novel/player/multi_video_model/player/v1", body.toString());
             Log.d(TAG, "multiVideoModel " + vid + " code=" + j.optInt("code")
                     + " tracks=" + trackCount(j));
             return j;
@@ -884,8 +907,10 @@ public final class Api {
             return null;
         }
         JSONObject node = data;
-        if (vid != null && data.optJSONObject(vid) != null) {
-            node = data.optJSONObject(vid);
+        JSONObject typed = data.optJSONObject("1004");
+        if (typed != null) node = typed;
+        if (vid != null && node.optJSONObject(vid) != null) {
+            node = node.optJSONObject(vid);
         }
         Object raw = node.opt("video_model");
         if (raw instanceof JSONObject) {

@@ -21,7 +21,9 @@ public class MS extends ms.bd.c.a4.a {
     public static byte[] sCert;
 
     /** op 16777233 要的版本号字符串。 */
-    public static String sVersion = "6.8.1.32";
+    public static String sVersion = "7.4.3.32";
+    public static int sVersionCode = 74332;
+    public static android.content.Context sContext;
 
     /**
      * metasec 的 native → Java 回调分发器。
@@ -39,13 +41,15 @@ public class MS extends ms.bd.c.a4.a {
                 return Boolean.TRUE;
             case 16777232:
                 // 内部版本号（整数形式）
-                return 68132;
+                return sVersionCode;
             case 16777233:
                 return sVersion;
             case 16777218:
                 return sCert;
             case 268435470:
-                return System.currentTimeMillis();
+                return 2L;
+            case 268435471:
+                return 0L;
             default:
                 return null;
         }

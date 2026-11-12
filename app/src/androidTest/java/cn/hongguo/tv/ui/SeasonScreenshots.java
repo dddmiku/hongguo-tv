@@ -8,8 +8,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 
 /** Bounded visual evidence from the isolated, logged-out QA application. */
-final class SeasonScreenshots {
-    static void capture(Instrumentation instrumentation, String name) throws IOException {
+public final class SeasonScreenshots {
+    public static void capture(Instrumentation instrumentation, String name) throws IOException {
         if (!instrumentation.getTargetContext().getPackageName().endsWith(".qa"))
             throw new IllegalStateException("Season screenshots require the QA package");
         instrumentation.waitForIdleSync();
