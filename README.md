@@ -1,12 +1,35 @@
 # 红果客厅 TV
 
+给 Android TV 和电视盒子的短剧播放器。墨蓝与暖金界面，遥控器就能挑剧、选集、切季和继续上次的故事。
+
+**[下载 TV 安装包](https://github.com/dddmiku/hongguo-tv/releases/latest)** · [遥控器操作](#遥控器操作) · [问题反馈](https://github.com/dddmiku/hongguo-tv/issues) · [电脑版](https://github.com/dddmiku/hongguo-desktop)
+
+当前安装包适用于 **ARM64** 设备；旧版用户请覆盖安装，保留账号、历史、追剧和设置。
+
+## 界面预览
+
+精选首页，大海报、大卡片，用遥控器左右挑一部想看的剧。
+
+[![红果客厅 TV 精选首页](docs/screenshots/home.png)](docs/screenshots/home.png)
+
+<table>
+  <tr>
+    <td width="50%" align="center"><a href="docs/screenshots/playback.webp"><img src="docs/screenshots/playback.webp" alt="TV 播放页与遥控器操作提示" width="450"></a><br><strong>大屏播放，遥控器掌控</strong><br>暂停、快进退、画质与选集</td>
+    <td width="50%" align="center"><a href="docs/screenshots/details.webp"><img src="docs/screenshots/details.webp" alt="剧集海报、剧情简介和选集入口" width="450"></a><br><strong>先看简介，再挑一集</strong><br>剧集详情、直接播放与追剧</td>
+  </tr>
+</table>
+
+点击图片可查看原图。
+
+## 安装与使用
+
 独立 TV 源码与更新仓库：[dddmiku/hongguo-tv](https://github.com/dddmiku/hongguo-tv)。安装包在 [Releases](https://github.com/dddmiku/hongguo-tv/releases)，问题反馈在 [Issues](https://github.com/dddmiku/hongguo-tv/issues)。PC 独立维护于 [hongguo-desktop](https://github.com/dddmiku/hongguo-desktop)。
 
 旧混合发布仓库 `hongguo-desktop-releases` 自 **2026 年 11 月 7 日**起停止维护。TV 从 1.1.3 起直接读取本仓库更新清单，继续使用原包名和签名。请覆盖安装新版，账号、历史、追剧和设置会保留，不需要先卸载。详见 [迁移说明](docs/migration.md)。
 
 Android TV / 电视盒子客户端。1.1.0 接手原 TV 项目，沿用 `cn.hongguo.tv` 包名与正式签名，可覆盖升级。
 
-1.3.1 修复国内手机播放签名、压缩请求体与后续集取流，失败时尝试官方备用 CDN 并有界重新取流。此版本提供已在模拟器实际解码验证的 ARM64 包；ARM32 不包含在本次发布中，本轮没有实体电视测试。
+1.3.1 修复国内手机播放签名、压缩请求体与后续集取流，失败时尝试官方备用 CDN 并重新取流。此版本提供 ARM64 包，暂不提供 ARM32 包。
 
 新版采用墨蓝与暖金主题，精选、片库、追剧、历史和搜索有独立入口。精选突出一部作品，首屏保留更多片单；片库支持真实体裁与题材筛选、排序和翻页。遥控器左右在行内移动、上下跨行，返回时保留页面与焦点。剧集详情支持直接续播、从第一集看和任意选集。
 
@@ -20,7 +43,9 @@ Android TV / 电视盒子客户端。1.1.0 接手原 TV 项目，沿用 `cn.hong
 
 进度先落本机，后台补传历史与独立续播两份记录；两份都成功才确认。重试保护手机更新的真实观看时间，用户回看较低集数也按最近观看处理。账号切换保留各自片库，上传确认不会清除之后的新进度。
 
-播放器：确定暂停/继续，左右快进退，上键打开播放设置，下键选集。全部季、画质、倍速、比例、自动连播和追剧均能用遥控器操作。字幕式控制提示只在操作时显示；短于五秒的位置也精确保留，退出前立即保存。
+## 遥控器操作
+
+确定暂停/继续，左右快进退，上键打开播放设置，下键选集。全部季、画质、倍速、比例、自动连播和追剧均能用遥控器操作。字幕式控制提示只在操作时显示；短于五秒的位置也精确保留，退出前立即保存。
 
 ## 构建
 
