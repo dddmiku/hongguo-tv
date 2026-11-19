@@ -116,8 +116,8 @@ public class MainActivity extends TvActivity {
             Api.Series featured=hot!=null&&!hot.isEmpty()?hot.get(0):fresh!=null&&!fresh.isEmpty()?fresh.get(0):null;
             if(featured!=null)hero(featured);
             List<WatchRecord> recent=library.store().page(library.owner(),"",0,3);if(!recent.isEmpty())recent(recent);
-            if(hot!=null&&!hot.isEmpty())rail("正在热播",hot);
-            if(fresh!=null&&!fresh.isEmpty())rail("新鲜上架",fresh);
+            if(hot!=null&&!hot.isEmpty())rail("hot_score","正在热播",hot);
+            if(fresh!=null&&!fresh.isEmpty())rail("online_time","新鲜上架",fresh);
         }
         if(sections.isEmpty()){LinearLayout empty=TvUi.column(this);empty.setPadding(dp(28),dp(44),dp(28),dp(32));empty.setBackground(TvFocus.round(this,18,TvUi.SURFACE,0,0));empty.addView(TvUi.heading(this,"好故事正在路上",26));TextView message=TvUi.text(this,"首次加载需要连接内容服务，已有片单和本机历史可离线查看。",16,TvUi.DIM);message.setPadding(0,dp(12),0,dp(22));empty.addView(message);TextView retry=TvUi.button(this,"重新加载",true,()->load(true));retry.setTag("retry-catalog");empty.addView(retry);content.addView(empty);focusRows.add(java.util.Collections.singletonList(retry));if(firstAction==null)firstAction=retry;}
         TvFocus.linkRows(focusRows);linkNavigation();
@@ -139,14 +139,14 @@ public class MainActivity extends TvActivity {
         content.addView(line);focusRows.add(focus);
     }
     private void sectionTitle(String value){LinearLayout row=TvUi.row(this);row.setPadding(0,dp(18),0,dp(12));row.addView(TvUi.heading(this,value,20),new LinearLayout.LayoutParams(0,-2,1));row.addView(TvUi.text(this,"左右选择 · 确定查看",12,TvUi.DIM));content.addView(row);}
-    private void rail(String title,List<Api.Series> items){
+    private void rail(String section,String title,List<Api.Series> items){
         sectionTitle(title);HorizontalScrollView sv=new HorizontalScrollView(this);sv.setHorizontalScrollBarEnabled(false);sv.setFocusable(false);sv.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);sv.setClipToPadding(false);sv.setClipChildren(false);
         LinearLayout row=TvUi.row(this);List<View> focus=new ArrayList<>();
-        for(Api.Series s:items){View card=card(s,132);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(144),-2);p.setMargins(0,0,dp(14),dp(4));row.addView(card,p);focus.add(card);}
+        for(Api.Series s:items){View card=card(s,132,section);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(144),-2);p.setMargins(0,0,dp(14),dp(4));row.addView(card,p);focus.add(card);}
         sv.addView(row);content.addView(sv,new LinearLayout.LayoutParams(-1,-2));focusRows.add(focus);
     }
-    private View card(Api.Series s,int posterWidth){
-        LinearLayout card=TvUi.column(this);card.setId(View.generateViewId());card.setTag("series:"+s.seriesId);card.setPadding(dp(6),dp(6),dp(6),dp(10));TvFocus.applyCard(card,this,12);card.setContentDescription(s.title+(s.episodeCount>0?"，"+s.episodeCount+" 集":""));
+    private View card(Api.Series s,int posterWidth,String section){
+        LinearLayout card=TvUi.column(this);card.setId(View.generateViewId());card.setTag("series:"+s.seriesId+":"+section);card.setPadding(dp(6),dp(6),dp(6),dp(10));TvFocus.applyCard(card,this,12);card.setContentDescription(s.title+(s.episodeCount>0?"，"+s.episodeCount+" 集":""));
         card.addView(TvUi.poster(this,s.cover,posterWidth,posterWidth<=132?posterWidth*12/11:posterWidth*4/3));TextView title=TvUi.heading(this,s.title,16);title.setMaxLines(posterWidth<=132?1:2);title.setMinLines(posterWidth<=132?1:2);title.setEllipsize(android.text.TextUtils.TruncateAt.END);title.setPadding(dp(6),dp(8),dp(6),0);card.addView(title);
         WatchRecord watched=library.store().find(library.owner(),s.seriesId);String subtitle=watched!=null?"看到第 "+watched.episode+" 集":s.episodeCount>0?s.episodeCount+" 集" :s.category;
         TextView meta=TvUi.text(this,subtitle,11,watched!=null?TvUi.ACCENT:TvUi.DIM);meta.setPadding(dp(6),dp(4),dp(6),0);meta.setSingleLine();meta.setEllipsize(android.text.TextUtils.TruncateAt.END);card.addView(meta);card.setOnClickListener(v->SeriesDialog.show(this,s,library));return card;
@@ -165,7 +165,7 @@ public class MainActivity extends TvActivity {
     }
     private void addTheme(LinearLayout row,List<View> focus,String name,String id){TextView b=TvUi.tab(this,name,theme.equals(id),()->{theme=id;themeName=name;load(false);});b.setTag("theme:"+id);row.addView(b);focus.add(b);}
     private void grid(List<Api.Series> items){
-        final int cols=5;for(int from=0;from<items.size();from+=cols){LinearLayout row=TvUi.row(this);List<View> focus=new ArrayList<>();for(int i=0;i<cols;i++){if(from+i<items.size()){View card=card(items.get(from+i),146);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,-2,1);p.setMargins(0,0,i==cols-1?0:dp(14),dp(16));row.addView(card,p);focus.add(card);}else row.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));}content.addView(row);focusRows.add(focus);}
+        final int cols=5;for(int from=0;from<items.size();from+=cols){LinearLayout row=TvUi.row(this);List<View> focus=new ArrayList<>();for(int i=0;i<cols;i++){if(from+i<items.size()){View card=card(items.get(from+i),146,"browse");LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,-2,1);p.setMargins(0,0,i==cols-1?0:dp(14),dp(16));row.addView(card,p);focus.add(card);}else row.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));}content.addView(row);focusRows.add(focus);}
         TextView more=TvUi.button(this,loadingMore?"加载中…":"查看更多",false,this::loadMore);more.setTag("catalog-more");more.setEnabled(!loadingMore);content.addView(more,new LinearLayout.LayoutParams(dp(160),dp(44)));focusRows.add(java.util.Collections.singletonList(more));
     }
     private void loadMore(){

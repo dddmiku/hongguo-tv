@@ -6,3 +6,5 @@ keystore/
 _work/
 *.hprof
 *.log
+__pycache__/
+*.pyc

@@ -136,7 +136,7 @@ public class SearchActivity extends TvActivity {
     }
 
     private void doSearch(String q) {
-        if (q.isEmpty()) {
+        if (q.isEmpty() || isFinishing() || isDestroyed()) {
             return;
         }
         hideKeyboard();
@@ -144,15 +144,14 @@ public class SearchActivity extends TvActivity {
         final int request=++generation;
         new Thread(() -> {
             try {
-                JSONObject j = api.search(q);
+                JSONObject j = requestSearch(q);
                 int code = j.optInt("code", -1);
                 if (code != 0) {
-                    runOnUiThread(() -> setStatus("搜索失败 code=" + code));
+                    publishSearch(request, () -> setStatus("搜索暂时失败，请重试"));
                     return;
                 }
                 List<Api.Series> got = parseSearch(j);
-                runOnUiThread(() -> {
-                    if(request!=generation||isDestroyed())return;
+                publishSearch(request, () -> {
                     items.clear();
                     items.addAll(got);
                     results.removeAllViews();
@@ -163,9 +162,21 @@ public class SearchActivity extends TvActivity {
                 });
             } catch (Throwable e) {
                 Log.e(TAG, "搜索异常", e);
-                runOnUiThread(() -> {if(request==generation&&!isDestroyed())setStatus("搜索暂时失败，请重试");});
+                publishSearch(request, () -> setStatus("搜索暂时失败，请重试"));
             }
         }, "search").start();
+    }
+
+    private void publishSearch(int request, Runnable result) {
+        runOnUiThread(() -> {
+            if (request != generation || isFinishing() || isDestroyed()) return;
+            result.run();
+        });
+    }
+
+    /** The debug fixture overrides transport while keeping the real worker and UI callbacks. */
+    protected JSONObject requestSearch(String query) throws Exception {
+        return api.search(query);
     }
 
     /**

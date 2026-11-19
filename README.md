@@ -29,6 +29,8 @@
 
 Android TV / 电视盒子客户端。1.1.0 接手原 TV 项目，沿用 `cn.hongguo.tv` 包名与正式签名，可覆盖升级。
 
+1.3.2 优化遥控器播放控制、搜索与首页浏览：暂停时保留控制栏，恢复播放后自动收起；过期搜索回复不再覆盖新结果或已退出的页面；相同封面合并下载，首页刷新继续保留原分区的焦点。
+
 1.3.1 修复国内手机播放签名、压缩请求体与后续集取流，失败时尝试官方备用 CDN 并重新取流。此版本提供 ARM64 包，暂不提供 ARM32 包。
 
 新版采用墨蓝与暖金主题，精选、片库、追剧、历史和搜索有独立入口。精选突出一部作品，首屏保留更多片单；片库支持真实体裁与题材筛选、排序和翻页。遥控器左右在行内移动、上下跨行，返回时保留页面与焦点。剧集详情支持直接续播、从第一集看和任意选集。
@@ -57,7 +59,7 @@ Android TV / 电视盒子客户端。1.1.0 接手原 TV 项目，沿用 `cn.hong
 gradle :app:assembleRelease
 ```
 
-Gradle 产物在 `app/build/outputs/apk/release/hongguo-tv-1.3.1.apk`。正式签名使用本机 `keystore.properties` 和 `keystore/hongguo-tv.jks`，均排除在源码仓库之外。请覆盖安装，不要先卸载旧版。
+Gradle 产物在 `app/build/outputs/apk/release/hongguo-tv-1.3.2.apk`。正式签名使用本机 `keystore.properties` 和 `keystore/hongguo-tv.jks`，均排除在源码仓库之外。请覆盖安装，不要先卸载旧版。
 
 安装包、入口图标和 TV banner 必须是 PNG；系统安装器不能使用固有尺寸无效的 shape 图标。LEANBACK_LAUNCHER 与 LAUNCHER 保持独立 intent-filter。签名上下文由 Application 统一初始化，直接启动账号、历史或播放器也可使用。
 
@@ -66,6 +68,7 @@ Gradle 产物在 `app/build/outputs/apk/release/hongguo-tv-1.3.1.apk`。正式�
 ```powershell
 gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
 python tools/verify-player-lifecycle.py --install --full
+python tools/verify-tv-experience.py --install
 python tools/verify-seasons.py --install
 python tools/verify-seasons.py --details
 python tools/verify-seasons.py --live
@@ -86,7 +89,7 @@ python -m unittest discover -s tools -p test_publish.py
 python tools/publish.py --source-commit <已推送的40位源码提交>
 ```
 
-TV Release 标签为 `v1.3.1`，安装资产使用 `hongguo-tv-1.3.1.APK`。发布器先上传草稿并核对资产大小和 SHA-256，再公开。已公开版本不替换资产；发现修复应递增版本号。
+TV Release 标签为 `v1.3.2`，安装资产使用 `hongguo-tv-1.3.2.APK`。发布器先上传草稿并核对资产大小和 SHA-256，再公开。已公开版本不替换资产；发现修复应递增版本号。
 
 更新清单只发布本仓库的 `platforms.android-tv` 与 TV 版本，无需读取 PC 版本或旧仓库；PC 与 TV 各自拥有源码、发行包、更新清单与版本线。旧仓库保留一份最终迁移清单，供旧安装读取，后续常规发布不再写入旧仓库。
 

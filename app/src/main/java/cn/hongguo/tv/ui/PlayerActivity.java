@@ -1023,12 +1023,13 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     private static final long OVERLAY_HIDE_MS = 3000;
 
     private final Runnable hideOverlay = () -> {
-        if (overlay != null) {
-            overlay.animate().alpha(0f).setDuration(250).start();
-        }
+        if (overlay == null || player == null || !prepared || !foreground || userPaused) return;
+        try {
+            if (player.isPlaying()) overlay.animate().alpha(0f).setDuration(250).start();
+        } catch (IllegalStateException ignored) { }
     };
 
-    /** 播放开始后隐藏叠加层；按任意键重新显示。 */
+    /** 播放开始后隐藏叠加层；播放控制操作会重新显示。 */
     private void scheduleHideOverlay() {
         ui.removeCallbacks(hideOverlay);
         // 暂停时不自动隐藏：用户暂停通常就是想看进度/切清晰度，
@@ -1184,8 +1185,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        // 任何按键都先唤出叠加层：用户操作时要能看见进度和状态
-        showOverlay();
+        // 只有播放器处理的操作显示反馈，不因系统或未知按键遮挡画面。
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
@@ -1193,22 +1193,28 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 togglePause();
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
+                showOverlay();
                 seekBy(-SEEK_MS);
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
+                showOverlay();
                 seekBy(SEEK_MS);
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
+                showOverlay();
                 showPlaybackMenu();
                 return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
+                showOverlay();
                 showEpisodePicker();
                 return true;
             case KeyEvent.KEYCODE_MENU:
             case KeyEvent.KEYCODE_M:
+                showOverlay();
                 showPlaybackMenu();
                 return true;
             case KeyEvent.KEYCODE_S:
+                showOverlay();
                 cycleSpeed();
                 return true;
             case KeyEvent.KEYCODE_F:
@@ -1216,6 +1222,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 return true;
             case KeyEvent.KEYCODE_A:
                 // 画面比例：适应 / 填充 / 拉伸
+                showOverlay();
                 cycleAspect();
                 return true;
             default:
@@ -1249,6 +1256,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
 
     private void togglePause() {
         if (player == null || !prepared) {
+            showOverlay();
             return;
         }
         try {
@@ -1269,6 +1277,9 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
             }
         } catch (Throwable e) {
             Log.w(TAG, "暂停切换失败", e);
+        } finally {
+            // 状态切换完成后再计时：暂停保留控制栏，继续播放重新自动收起。
+            showOverlay();
         }
     }
 

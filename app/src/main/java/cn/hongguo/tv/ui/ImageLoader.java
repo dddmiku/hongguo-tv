@@ -9,17 +9,23 @@ import android.util.LruCache;
 import android.widget.ImageView;
 
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 极简图片加载器：内存 LRU + 后台下载 + ImageView 复用标记。
+ * 极简图片加载器：内存 LRU + 在途请求合并 + ImageView 弱引用订阅。
  *
  * 为什么不引 Glide / Picasso：
  *   包体约束（见 build.gradle）。这里只需要「按 URL 取图、缓存、贴到
- *   ImageView」，自己写不到 100 行，而 Glide 会带进 ~500KB 依赖。
+ *   ImageView」，不需要额外图片框架与运行时依赖。
  *
  * 为什么需要 tag 校验：
  *   ImageView 会被回收复用，异步回来时它可能已经绑定了别的 URL。
@@ -40,6 +46,23 @@ final class ImageLoader {
 
     private static final ExecutorService POOL = Executors.newFixedThreadPool(4);
     private static final Handler UI = new Handler(Looper.getMainLooper());
+    /** A queued or running URL owns one task; it never strongly retains a screen. */
+    private static final Map<String, PendingImage> PENDING = new HashMap<>();
+
+    private static final class PendingImage {
+        final String url;
+        final List<WeakReference<ImageView>> views = new ArrayList<>();
+        PendingImage(String url) { this.url = url; }
+        void subscribe(ImageView view) {
+            boolean subscribed = false;
+            for (Iterator<WeakReference<ImageView>> iterator = views.iterator(); iterator.hasNext();) {
+                ImageView target = iterator.next().get();
+                if (target == null) iterator.remove();
+                else if (target == view) subscribed = true;
+            }
+            if (!subscribed) views.add(new WeakReference<>(view));
+        }
+    }
 
     private ImageLoader() {
     }
@@ -51,27 +74,61 @@ final class ImageLoader {
             view.setTag(null);
             return;
         }
+        view.setTag(url);
         Bitmap hit = CACHE.get(url);
         if (hit != null) {
             view.setImageBitmap(hit);
-            view.setTag(url);
             return;
         }
         view.setImageDrawable(null);
-        view.setTag(url);
-        POOL.execute(() -> {
-            Bitmap bmp = fetch(url);
-            if (bmp == null) {
-                return;
+        final PendingImage request;
+        synchronized (PENDING) {
+            // A worker may have populated the cache since the first lookup.
+            hit = CACHE.get(url);
+            if (hit != null) { view.setImageBitmap(hit); return; }
+            PendingImage existing = PENDING.get(url);
+            if (existing != null) { existing.subscribe(view); return; }
+            request = new PendingImage(url);
+            request.subscribe(view);
+            PENDING.put(url, request);
+        }
+        try { POOL.execute(() -> download(request)); }
+        catch (RuntimeException failure) {
+            finish(request, null);
+            Log.d(TAG, "封面任务失败：" + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static void download(PendingImage request) {
+        Bitmap bitmap = null;
+        try {
+            // Other work may have filled the cache while this task waited in the pool.
+            bitmap = CACHE.get(request.url);
+            if (bitmap == null) bitmap = fetch(request.url);
+            if (bitmap != null) CACHE.put(request.url, bitmap);
+        } catch (Throwable failure) {
+            Log.d(TAG, "封面任务失败：" + failure.getClass().getSimpleName());
+        }
+        final Bitmap result = bitmap;
+        if (!UI.post(() -> finish(request, result))) finish(request, null);
+    }
+
+    private static void finish(PendingImage request, Bitmap bitmap) {
+        final List<WeakReference<ImageView>> subscribers;
+        synchronized (PENDING) {
+            if (PENDING.get(request.url) != request) return;
+            PENDING.remove(request.url);
+            subscribers = new ArrayList<>(request.views);
+            request.views.clear();
+        }
+        // Failures also release the in-flight entry so the next bind can retry.
+        if (bitmap == null) return;
+        for (WeakReference<ImageView> reference : subscribers) {
+            ImageView view = reference.get();
+            if (view != null && request.url.equals(view.getTag())) {
+                view.setImageBitmap(bitmap);
             }
-            CACHE.put(url, bmp);
-            UI.post(() -> {
-                // 复用校验：这期间 view 可能已经绑了别的图
-                if (url.equals(view.getTag())) {
-                    view.setImageBitmap(bmp);
-                }
-            });
-        });
+        }
     }
 
     private static Bitmap fetch(String url) {
@@ -97,7 +154,7 @@ final class ImageLoader {
                 return BitmapFactory.decodeByteArray(data, 0, data.length, o);
             }
         } catch (Throwable e) {
-            Log.d(TAG, "取图失败 " + url + " : " + e.getMessage());
+            Log.d(TAG, "取图失败：" + e.getClass().getSimpleName());
             return null;
         } finally {
             if (c != null) {

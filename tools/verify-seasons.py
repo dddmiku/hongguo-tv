@@ -30,8 +30,9 @@ def main():
     result=adb('shell','am','instrument','-w','-r','-e','class',','.join(classes),'cn.hongguo.tv.qa.test/android.test.InstrumentationTestRunner',timeout=420)
     output=result.stdout+result.stderr
     match=re.search(r'OK \((\d+) tests?\)',output)
+    count=match or re.search(r'INSTRUMENTATION_STATUS: numtests=(\d+)',output)
     passed=bool(match) and not any(value in output for value in ('FAILURES!!!','Process crashed','INSTRUMENTATION_FAILED'))
-    report={'passed':passed,'tests':int(match.group(1)) if match else 0,'classes':classes,'isolatedPackage':True,'mediaMuted':True}
+    report={'passed':passed,'tests':int(count.group(1)) if count else 0,'classes':classes,'isolatedPackage':True,'mediaMuted':True,'processCrashed':'Process crashed' in output}
     screenshot='seasons-details' if args.details else 'seasons-player' if args.live else None
     if passed and screenshot:
         pulled=adb('pull','/sdcard/Android/data/cn.hongguo.tv.qa/files/'+screenshot+'.png',str(WORK/(screenshot+'.png')))

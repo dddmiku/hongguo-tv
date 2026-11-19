@@ -44,12 +44,22 @@ public class PlayerSeasonDeviceTest extends InstrumentationTestCase {
                 .putExtra(PlayerActivity.EXTRA_SERIES_ID, SOURCE).putExtra(PlayerActivity.EXTRA_TITLE, "离线第一季")
                 .putExtra(PlayerActivity.EXTRA_COVER, "fixture-cover-one")
                 .putExtra(PlayerActivity.EXTRA_EPISODES, EPISODES).putExtra(PlayerActivity.EXTRA_START_INDEX, 0)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         player = (SeasonPlayerFixtureActivity) getInstrumentation().startActivitySync(intent);
-        long until = System.currentTimeMillis() + 5000;
-        while (System.currentTimeMillis() < until && !main(() -> status().contains("受控离线"))) Thread.sleep(20);
-        assertTrue(main(() -> status().contains("受控离线")));
+        long until = android.os.SystemClock.uptimeMillis() + 10000;
+        boolean ready = false;
+        while (android.os.SystemClock.uptimeMillis() < until) {
+            ready = main(() -> !player.isFinishing() && !player.isDestroyed()
+                    && (Boolean) field("foreground") && status().contains("受控离线"));
+            if (ready) break;
+            Thread.sleep(20);
+        }
+        assertTrue("受控播放器未在前台完成初始加载：" + main(() ->
+                "foreground=" + field("foreground") + ",isFinishing=" + player.isFinishing()
+                        + ",isDestroyed=" + player.isDestroyed()), ready);
         main(() -> {
+            assertFalse("注入解码器前 Activity 已退出", player.isFinishing() || player.isDestroyed());
+            assertTrue("注入解码器前 Activity 已离开前台", (Boolean) field("foreground"));
             FakePlayer decoder = new FakePlayer();
             set("player", decoder); set("prepared", true); set("surfaceReady", false);
             coordinator().armCompletion();
@@ -59,14 +69,30 @@ public class PlayerSeasonDeviceTest extends InstrumentationTestCase {
 
     @Override protected void tearDown() throws Exception {
         try {
-            if (player != null) main(() -> { player.finish(); return null; });
+            if (player != null) {
+                main(() -> {
+                    if (!player.isFinishing() && !player.isDestroyed()) player.finish();
+                    return null;
+                });
+                long until = android.os.SystemClock.uptimeMillis() + 10000;
+                while (android.os.SystemClock.uptimeMillis() < until && !main(player::isDestroyed)) Thread.sleep(20);
+                assertTrue("上一项受控播放器尚未销毁", main(player::isDestroyed));
+            }
             getInstrumentation().waitForIdleSync();
         } finally { super.tearDown(); }
     }
 
     private <T> T main(Supplier<T> action) {
         AtomicReference<T> value = new AtomicReference<>();
-        getInstrumentation().runOnMainSync(() -> value.set(action.get()));
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        getInstrumentation().runOnMainSync(() -> {
+            try { value.set(action.get()); }
+            catch (Throwable error) { failure.set(error); }
+        });
+        Throwable error = failure.get();
+        if (error instanceof Error) throw (Error) error;
+        if (error instanceof RuntimeException) throw (RuntimeException) error;
+        if (error != null) throw new AssertionError(error);
         return value.get();
     }
     private Object field(String name) {
@@ -117,6 +143,26 @@ public class PlayerSeasonDeviceTest extends InstrumentationTestCase {
     }
     private static void put(Object object, String name, Object value) throws Exception {
         Field f = object.getClass().getDeclaredField(name); f.setAccessible(true); f.set(object,value);
+    }
+    private String seasonSelectionState() {
+        Object ready = field("nextTarget");
+        boolean fileExists = false, capMatches = false;
+        if (ready != null) {
+            try {
+                Field fileField = ready.getClass().getDeclaredField("file");
+                fileField.setAccessible(true);
+                File file = (File) fileField.get(ready);
+                fileExists = file != null && file.isFile();
+                Field capField = ready.getClass().getDeclaredField("cap");
+                capField.setAccessible(true);
+                capMatches = capField.getInt(ready) == ((int[]) field("CAPS"))[(Integer) field("capIndex")];
+            } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+        }
+        return "foreground=" + field("foreground") + ",prepared=" + field("prepared")
+                + ",isFinishing=" + player.isFinishing() + ",isDestroyed=" + player.isDestroyed()
+                + ",samePlaybackAccount=" + invoke("samePlaybackAccount", new Class<?>[0])
+                + ",nextTargetNull=" + (ready == null) + ",targetFileExists=" + fileExists
+                + ",capMatches=" + capMatches;
     }
     private void apply(Object target, SeasonPlaybackCoordinator.Ticket ticket) {
         invoke("switchToSeason",new Class<?>[]{target.getClass(),SeasonPlaybackCoordinator.Ticket.class},target,ticket);
@@ -226,7 +272,8 @@ public class PlayerSeasonDeviceTest extends InstrumentationTestCase {
                 set("capIndex",1); set("nextTarget",target());
                 invoke("selectSeason",new Class<?>[]{SeasonRepository.Season.class},
                         season(TARGET,2,"离线第二季","fixture-cover-two"));
-                assertEquals(TARGET,field("seriesId")); assertTrue(cancellation.cancelled());
+                assertEquals("手动切季未提交：" + seasonSelectionState(), TARGET, field("seriesId"));
+                assertTrue(cancellation.cancelled());
                 assertTrue((Integer)field("loadGeneration") > previousRequest);
                 return null;
             });
