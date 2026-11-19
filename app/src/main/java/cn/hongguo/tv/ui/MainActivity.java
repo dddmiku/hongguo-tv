@@ -1,5 +1,6 @@
 package cn.hongguo.tv.ui;
 
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import cn.hongguo.tv.account.Account;
 import cn.hongguo.tv.api.Api;
 import cn.hongguo.tv.cache.CatalogRepository;
@@ -31,12 +33,14 @@ public class MainActivity extends TvActivity {
     private static final String TAG="HgTV";
     private static final String[] GENRES={"短剧","漫剧","AI 短剧"};
     private final ExecutorService loaders=Executors.newFixedThreadPool(3);
+    private final ExecutorService resumeLoader = Executors.newSingleThreadExecutor();
     private final Map<String,List<Api.Series>> sections=new LinkedHashMap<>();
     private final List<List<View>> focusRows=new ArrayList<>();
     private final List<TextView> navigation=new ArrayList<>();
     private final Map<Integer,List<String[]>> themeCache=new HashMap<>();
     private List<String[]> themes=new ArrayList<>();
     private Api api;
+    private SeriesEpisodes.Source resumeSource;
     private CatalogRepository catalogs;
     private LibraryRepository library;
     private LinearLayout content,header,root;
@@ -47,7 +51,9 @@ public class MainActivity extends TvActivity {
     private String theme="",sort="hot_score",themeName="全部题材";
     private int generation;
     private boolean initiallyFocused,userNavigated,loadingMore;
-    private final Runnable libraryChanged=()->{if(!isFinishing()&&!isDestroyed()){updateAccount();if(page==0&&!sections.isEmpty())render();}};
+    private boolean resumed;
+    private ResumeRequest resumeRequest;
+    private final Runnable libraryChanged=()->{if(!isFinishing()&&!isDestroyed()){updateAccount();if(page==0)render();}};
     private boolean updateUiBusy;
     private java.io.File pendingApk;
     private String pendingApkVersion="";
@@ -55,6 +61,7 @@ public class MainActivity extends TvActivity {
     @Override protected void onCreate(Bundle saved){
         super.onCreate(saved);cn.hongguo.tv.sign.RequestSigner.bind(this);
         api=new Api(this);catalogs=new CatalogRepository(this);library=LibraryRepository.get(this);
+        resumeSource = api::episodes;
         if(saved!=null){page=saved.getInt("page");genre=saved.getInt("genre");theme=saved.getString("theme","");themeName=saved.getString("themeName","全部题材");sort=saved.getString("sort","hot_score");}
         buildUi();load(false);loadThemes();autoCheckUpdate();
         if(cn.hongguo.tv.BuildConfig.DEBUG){android.util.DisplayMetrics metrics=getResources().getDisplayMetrics();Log.i("HgQA","density="+metrics.density+" scaled="+metrics.scaledDensity+" fontScale="+getResources().getConfiguration().fontScale);}
@@ -115,7 +122,8 @@ public class MainActivity extends TvActivity {
             List<Api.Series> hot=sections.get("hot_score"),fresh=sections.get("online_time");
             Api.Series featured=hot!=null&&!hot.isEmpty()?hot.get(0):fresh!=null&&!fresh.isEmpty()?fresh.get(0):null;
             if(featured!=null)hero(featured);
-            List<WatchRecord> recent=library.store().page(library.owner(),"",0,3);if(!recent.isEmpty())recent(recent);
+            String owner = library.owner();
+            List<WatchRecord> recent=library.store().page(owner,"",0,3);if(!recent.isEmpty())recent(recent, owner);
             if(hot!=null&&!hot.isEmpty())rail("hot_score","正在热播",hot);
             if(fresh!=null&&!fresh.isEmpty())rail("online_time","新鲜上架",fresh);
         }
@@ -133,10 +141,115 @@ public class MainActivity extends TvActivity {
         copy.addView(TvUi.text(this,(s.episodeCount>0?s.episodeCount+" 集  ·  ":"")+(!s.category.isEmpty()?s.category:GENRES[genre]),13,TvUi.DIM));
         TextView play=TvUi.button(this,"选集播放  ›",true,()->SeriesDialog.show(this,s,library));play.setTag("hero:"+s.seriesId);copy.addView(play,new LinearLayout.LayoutParams(dp(144),dp(40)));firstAction=play;focusRows.add(java.util.Collections.singletonList(play));hero.addView(copy,new LinearLayout.LayoutParams(0,-2,1));content.addView(hero,new LinearLayout.LayoutParams(-1,-2));
     }
-    private void recent(List<WatchRecord> rows){
+    private void recent(List<WatchRecord> rows, String owner){
         LinearLayout line=TvUi.row(this);line.setPadding(0,dp(16),0,0);List<View> focus=new ArrayList<>();
-        for(WatchRecord r:rows){String title=r.title.isEmpty()?"继续上次的故事":r.title;TextView button=TvUi.button(this,"继续 · "+title+"  第 "+r.episode+" 集",false,()->{Api.Series s=new Api.Series();s.seriesId=r.seriesId;s.title=title;s.cover=r.cover;s.episodeCount=r.total;SeriesDialog.show(this,s,library);});button.setTag("recent:"+r.seriesId);button.setSingleLine();button.setEllipsize(android.text.TextUtils.TruncateAt.END);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(44),1);p.setMargins(0,0,dp(12),0);line.addView(button,p);focus.add(button);}
+        for(WatchRecord r:rows){String title=r.title.isEmpty()?"继续上次的故事":r.title;TextView button=TvUi.button(this,"继续 · "+title+"  第 "+r.episode+" 集",false,()->resumeFromHome(owner, r.seriesId));button.setTag("recent:"+r.seriesId);button.setSingleLine();button.setEllipsize(android.text.TextUtils.TruncateAt.END);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(44),1);p.setMargins(0,0,dp(12),0);line.addView(button,p);focus.add(button);}
         content.addView(line);focusRows.add(focus);
+        if (firstAction == null) firstAction = focus.get(0);
+    }
+
+    private static final class ResumeRequest {
+        final Api.Series series;
+        final String owner, sessionIdentity;
+        final AlertDialog dialog;
+        Future<?> work;
+
+        ResumeRequest(Api.Series series, Account account, AlertDialog dialog) {
+            this.series = series;
+            this.owner = account.libraryKey();
+            this.sessionIdentity = account.sessionIdentity();
+            this.dialog = dialog;
+        }
+    }
+
+    private void resumeFromHome(String owner, String seriesId) {
+        if (!resumed || page != 0 || isFinishing() || isDestroyed() || resumeRequest != null) return;
+        Account account = Account.load(this);
+        if (!account.libraryKey().equals(owner)) return;
+        WatchRecord record = library.store().find(owner, seriesId);
+        if (record == null) return;
+
+        Api.Series series = new Api.Series();
+        series.seriesId = seriesId;
+        series.title = record.title.isEmpty() ? "继续上次的故事" : record.title;
+        series.cover = record.cover;
+        series.episodeCount = record.total;
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("继续观看")
+                .setMessage("正在加载剧集…")
+                .setPositiveButton("重试", null)
+                .setNegativeButton("取消", null)
+                .create();
+        ResumeRequest request = new ResumeRequest(series, account, dialog);
+        resumeRequest = request;
+        dialog.setOnCancelListener(unused -> clearResume(request));
+        dialog.setOnDismissListener(unused -> clearResume(request));
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(unused -> clearResume(request));
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(unused -> loadResume(request));
+        loadResume(request);
+    }
+
+    private boolean canResume(ResumeRequest request) {
+        return resumeRequest == request && request.dialog.isShowing() && resumed && page == 0
+                && !isFinishing() && !isDestroyed()
+                && request.sessionIdentity.equals(Account.load(this).sessionIdentity());
+    }
+
+    private void loadResume(ResumeRequest request) {
+        if (!canResume(request)) {
+            clearResume(request);
+            return;
+        }
+        request.dialog.setMessage("正在加载剧集…");
+        request.dialog.getButton(AlertDialog.BUTTON_POSITIVE).setVisibility(View.INVISIBLE);
+        request.dialog.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
+        request.work = resumeLoader.submit(() -> {
+            try {
+                SeriesEpisodes result = SeriesEpisodes.load(resumeSource, request.series);
+                runOnUiThread(() -> finishResume(request, result));
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (!canResume(request)) {
+                        clearResume(request);
+                        return;
+                    }
+                    request.dialog.setMessage("暂时未能加载剧集，请重试。");
+                    View retry = request.dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                    retry.setVisibility(View.VISIBLE);
+                    retry.requestFocus();
+                });
+            }
+        });
+    }
+
+    private void finishResume(ResumeRequest request, SeriesEpisodes result) {
+        if (!canResume(request)) {
+            clearResume(request);
+            return;
+        }
+        WatchRecord record = library.store().find(request.owner, request.series.seriesId);
+        if (record == null) {
+            clearResume(request);
+            return;
+        }
+        if (!result.title.isEmpty()) request.series.title = result.title;
+        if (!result.cover.isEmpty()) request.series.cover = result.cover;
+        Intent intent = SeriesEpisodes.playback(this, request.series, result.rows, record.episode, record.position);
+        clearResume(request);
+        if (intent == null) {
+            SeriesDialog.showAfterMissingResume(this, request.series, library, result);
+        } else {
+            startActivity(intent);
+        }
+    }
+
+    private void clearResume(ResumeRequest request) {
+        if (request == null || resumeRequest != request) return;
+        resumeRequest = null;
+        if (request.work != null) request.work.cancel(true);
+        request.dialog.dismiss();
     }
     private void sectionTitle(String value){LinearLayout row=TvUi.row(this);row.setPadding(0,dp(18),0,dp(12));row.addView(TvUi.heading(this,value,20),new LinearLayout.LayoutParams(0,-2,1));row.addView(TvUi.text(this,"左右选择 · 确定查看",12,TvUi.DIM));content.addView(row);}
     private void rail(String section,String title,List<Api.Series> items){
@@ -174,12 +287,12 @@ public class MainActivity extends TvActivity {
     }
 
     private void autoCheckUpdate(){long previous=getPreferences(0).getLong("update_checked",0);if(System.currentTimeMillis()-previous<86400000)return;new Thread(()->{cn.hongguo.tv.update.Updater.Result result=cn.hongguo.tv.update.Updater.check(this);runOnUiThread(()->{if(isDestroyed())return;if(result.ok)getPreferences(0).edit().putLong("update_checked",System.currentTimeMillis()).apply();if(result.updateAvailable){updateBtn.setText("更新 •");updateBtn.setTextColor(TvUi.ACCENT);}});},"tv-update-check").start();}
-    @Override protected void onResume(){super.onResume();if(library!=null){library.observe(libraryChanged);updateAccount();library.sync(false);library.uploadPending();resumePendingInstall();}}
-    @Override protected void onPause(){if(library!=null)library.unobserve(libraryChanged);super.onPause();}
-    @Override protected void onDestroy(){generation++;loaders.shutdownNow();if(library!=null)library.unobserve(libraryChanged);super.onDestroy();}
+    @Override protected void onResume(){super.onResume();resumed=true;if(library!=null){library.observe(libraryChanged);updateAccount();library.sync(false);library.uploadPending();resumePendingInstall();}}
+    @Override protected void onPause(){resumed=false;clearResume(resumeRequest);if(library!=null)library.unobserve(libraryChanged);super.onPause();}
+    @Override protected void onDestroy(){generation++;loaders.shutdownNow();resumeLoader.shutdownNow();if(library!=null)library.unobserve(libraryChanged);super.onDestroy();}
     @Override protected void onSaveInstanceState(Bundle state){state.putInt("page",page);state.putInt("genre",genre);state.putString("theme",theme);state.putString("themeName",themeName);state.putString("sort",sort);super.onSaveInstanceState(state);}
     @Override public boolean dispatchKeyEvent(KeyEvent event){if(event.getAction()==KeyEvent.ACTION_DOWN)userNavigated=true;return super.dispatchKeyEvent(event);}
-    @Override public void onBackPressed(){if(scroll.getScrollY()>0){scroll.smoothScrollTo(0,0);navigation.get(page).requestFocus();return;}if(page==1){switchPage(0);return;}new android.app.AlertDialog.Builder(this).setTitle("退出红果客厅？").setMessage("观看位置会保留，下次可以接着看。").setPositiveButton("退出",(d,w)->finish()).setNegativeButton("继续看",null).show();}
+    @Override public void onBackPressed(){if(scroll.getScrollY()>0){scroll.smoothScrollTo(0,0);navigation.get(page).requestFocus();return;}if(page==1){switchPage(0);return;}super.onBackPressed();}
     private void setStatus(String text){runOnUiThread(()->{if(!isDestroyed()&&status!=null)status.setText(text);});}
     private int dp(int value){return TvUi.dp(this,value);}
     // Existing update download, checksum and unknown-source handoff are appended below.

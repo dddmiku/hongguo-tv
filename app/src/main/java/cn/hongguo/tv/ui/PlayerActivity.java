@@ -1189,8 +1189,11 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+            case KeyEvent.KEYCODE_BUTTON_SELECT:
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                togglePause();
+                if (event.getRepeatCount() == 0) togglePause();
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
                 showOverlay();
@@ -1201,15 +1204,18 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 seekBy(SEEK_MS);
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
+                if (event.getRepeatCount() != 0) return true;
                 showOverlay();
                 showPlaybackMenu();
                 return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (event.getRepeatCount() != 0) return true;
                 showOverlay();
                 showEpisodePicker();
                 return true;
             case KeyEvent.KEYCODE_MENU:
             case KeyEvent.KEYCODE_M:
+                if (event.getRepeatCount() != 0) return true;
                 showOverlay();
                 showPlaybackMenu();
                 return true;

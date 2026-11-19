@@ -6,6 +6,7 @@ import android.test.InstrumentationTestCase;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
+import android.widget.EditText;
 import android.widget.TextView;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -80,8 +81,8 @@ public class SearchAndFocusDeviceTest extends InstrumentationTestCase {
     private void submit(String query) {
         boolean submitted = main(() -> {
             if (search.isFinishing() || search.isDestroyed()) return false;
-            invoke(SearchActivity.class, search, "doSearch", new Class<?>[]{String.class}, query);
-            return true;
+            input().setText(query);
+            return go().performClick();
         });
         assertTrue("提交查询前夹具 Activity 已结束", submitted);
     }
@@ -106,6 +107,39 @@ public class SearchAndFocusDeviceTest extends InstrumentationTestCase {
     }
 
     private LinearLayout results() { return (LinearLayout) field(SearchActivity.class, search, "results"); }
+    private EditText input() { return (EditText) field(SearchActivity.class, search, "input"); }
+    private View go() { return (View) field(SearchActivity.class, search, "go"); }
+
+    public void testSearchFailureClearsPreviousResultsAndRetriesSameQuery() throws Exception {
+        search = (SearchFixtureActivity) open(SearchFixtureActivity.class);
+        submit(SearchFixtureActivity.FAST_QUERY);
+        waitFor("结果没有聚焦到首行", () -> results().getChildCount() == 1 && results().getChildAt(0).hasFocus());
+        submit(SearchFixtureActivity.RETRY_QUERY);
+        waitFor("失败未清理旧作品并聚焦重试", () -> results().getChildCount() == 1
+                && results().getChildAt(0) instanceof TextView && results().getChildAt(0).hasFocus()
+                && "重试搜索".contentEquals(((TextView) results().getChildAt(0)).getText()));
+        assertTrue(main(() -> results().getChildAt(0).performClick()));
+        waitFor("原词重试没有返回作品", () -> results().getChildCount() == 1
+                && SearchFixtureActivity.RESULT_TITLE.contentEquals(results().getChildAt(0).getContentDescription()));
+        assertEquals(2, search.retryRequests.get());
+    }
+
+    public void testEmptySearchCanReturnToSelectQuery() throws Exception {
+        search = (SearchFixtureActivity) open(SearchFixtureActivity.class);
+        submit(SearchFixtureActivity.EMPTY_QUERY);
+        waitFor("没有结果时未聚焦改词", () -> results().getChildCount() == 1 && results().getChildAt(0).hasFocus());
+        assertTrue(main(() -> results().getChildAt(0).performClick()));
+        assertTrue(main(() -> input().hasFocus() && input().getSelectionStart() == 0
+                && input().getSelectionEnd() == input().length()));
+    }
+
+    public void testDelayedResultsRespectUserFocus() throws Exception {
+        beginSlowSearch(true);
+        assertTrue(main(() -> input().requestFocus()));
+        releaseSlowSearch();
+        assertEquals(1, (int) main(() -> results().getChildCount()));
+        assertSame(main(this::input), main(search::getCurrentFocus));
+    }
 
     private void waitFor(String message, Supplier<Boolean> predicate) throws Exception {
         long until = System.currentTimeMillis() + 5000;

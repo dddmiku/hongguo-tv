@@ -40,13 +40,15 @@ public class SearchActivity extends TvActivity {
     private static final String TAG = "HgSearch";
 
     private EditText input;
+    private Button go;
     private TextView status;
     private int generation;
+    private int focusRevision;
+    private ScrollView resultsScroll;
     private LinearLayout results;
 
     private Api api;
     private PlayProgress progress;
-    private final List<Api.Series> items = new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -71,6 +73,7 @@ public class SearchActivity extends TvActivity {
         bar.setGravity(android.view.Gravity.CENTER_VERTICAL);
 
         Button back = new Button(this);
+        back.setId(View.generateViewId());
         back.setText("返回");
         back.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         back.setAllCaps(false);
@@ -78,6 +81,7 @@ public class SearchActivity extends TvActivity {
         bar.addView(back);
 
         input = new EditText(this);
+        input.setId(View.generateViewId());
         input.setHint("搜索剧名");
         input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         input.setTextColor(TvUi.TEXT);
@@ -100,8 +104,10 @@ public class SearchActivity extends TvActivity {
             return false;
         });
         input.setOnKeyListener((v, keyCode, ev) -> {
-            if (keyCode == KeyEvent.KEYCODE_ENTER && ev.getAction() == KeyEvent.ACTION_DOWN) {
-                doSearch(input.getText().toString().trim());
+            if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() == 0) {
+                    doSearch(input.getText().toString().trim());
+                }
                 return true;
             }
             return false;
@@ -109,7 +115,10 @@ public class SearchActivity extends TvActivity {
         bar.addView(input, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        Button go = new Button(this);
+        go = new Button(this);
+        go.setId(View.generateViewId());
+        go.setFocusableInTouchMode(true);
+        go.setOnFocusChangeListener((v, focused) -> { if (!focused) focusRevision++; });
         go.setText("搜索");
         go.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         go.setAllCaps(false);
@@ -119,16 +128,17 @@ public class SearchActivity extends TvActivity {
         root.addView(bar);
 
         status = new TextView(this);
+        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setTextColor(TvUi.DIM);
         status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         status.setPadding(0, dp(8), 0, dp(8));
         root.addView(status);
 
-        ScrollView sv = new ScrollView(this);
+        resultsScroll = new ScrollView(this);
         results = new LinearLayout(this);
         results.setOrientation(LinearLayout.VERTICAL);
-        sv.addView(results);
-        root.addView(sv, new LinearLayout.LayoutParams(
+        resultsScroll.addView(results);
+        root.addView(resultsScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
@@ -139,32 +149,55 @@ public class SearchActivity extends TvActivity {
         if (q.isEmpty() || isFinishing() || isDestroyed()) {
             return;
         }
+        go.requestFocus();
         hideKeyboard();
+        results.removeAllViews();
+        resultsScroll.scrollTo(0, 0);
+        go.setNextFocusDownId(View.NO_ID);
+        input.setNextFocusDownId(View.NO_ID);
         setStatus("搜索中…");
-        final int request=++generation;
+        final int request = ++generation;
+        final int submittedFocus = focusRevision;
         new Thread(() -> {
+            List<Api.Series> matches = null;
             try {
                 JSONObject j = requestSearch(q);
-                int code = j.optInt("code", -1);
-                if (code != 0) {
-                    publishSearch(request, () -> setStatus("搜索暂时失败，请重试"));
-                    return;
-                }
-                List<Api.Series> got = parseSearch(j);
-                publishSearch(request, () -> {
-                    items.clear();
-                    items.addAll(got);
-                    results.removeAllViews();
-                    for (Api.Series s : got) {
-                        results.addView(row(s));
-                    }
-                    setStatus(got.isEmpty() ? "没有找到短剧" : "找到 " + got.size() + " 部");
-                });
-            } catch (Throwable e) {
-                Log.e(TAG, "搜索异常", e);
-                publishSearch(request, () -> setStatus("搜索暂时失败，请重试"));
+                if (j.optInt("code", -1) == 0) matches = parseSearch(j);
+            } catch (Exception e) {
+                Log.w(TAG, "搜索请求失败");
             }
+            List<Api.Series> returned = matches;
+            publishSearch(request, () -> renderResults(q, returned, submittedFocus));
         }, "search").start();
+    }
+
+    private void renderResults(String query, List<Api.Series> matches, int submittedFocus) {
+        if (matches == null) {
+            setStatus("搜索暂时失败");
+            results.addView(TvUi.button(this, "重试搜索", true, () -> {
+                input.setText(query);
+                doSearch(query);
+            }));
+        } else if (matches.isEmpty()) {
+            setStatus("没有找到短剧");
+            results.addView(TvUi.button(this, "修改关键词", true, () -> {
+                input.requestFocus();
+                input.selectAll();
+                android.view.inputmethod.InputMethodManager keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
+                if (keyboard != null) keyboard.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+            }));
+        } else {
+            setStatus("找到 " + matches.size() + " 部");
+            for (Api.Series series : matches) results.addView(row(series));
+        }
+        View first = results.getChildAt(0);
+        if (first.getId() == View.NO_ID) first.setId(View.generateViewId());
+        go.setNextFocusDownId(first.getId());
+        input.setNextFocusDownId(first.getId());
+        first.setNextFocusUpId(go.getId());
+        if (go.hasFocus() && focusRevision == submittedFocus && query.equals(input.getText().toString().trim())) {
+            first.requestFocus();
+        }
     }
 
     private void publishSearch(int request, Runnable result) {
@@ -293,7 +326,6 @@ public class SearchActivity extends TvActivity {
             if (imm != null) {
                 imm.hideSoftInputFromWindow(input.getWindowToken(), 0);
             }
-            input.clearFocus();
         } catch (Throwable ignored) {
         }
     }

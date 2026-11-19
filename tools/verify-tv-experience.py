@@ -13,6 +13,7 @@ CLASSES = [
     'cn.hongguo.tv.ui.PlayerControlsDeviceTest',
     'cn.hongguo.tv.ui.SearchAndFocusDeviceTest',
     'cn.hongguo.tv.ui.ImageLoaderDeviceTest',
+    'cn.hongguo.tv.ui.HomeResumeDeviceTest',
 ]
 
 

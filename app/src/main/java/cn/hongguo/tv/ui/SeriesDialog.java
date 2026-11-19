@@ -23,7 +23,11 @@ import cn.hongguo.tv.cache.WatchRecord;
 
 /** A remote-accessible detail sheet. Opening a sheet never records a viewing. */
 final class SeriesDialog {
-    static SeriesDialog show(TvActivity activity,Api.Series series,LibraryRepository library){SeriesDialog sheet=new SeriesDialog(activity,series,library);sheet.show();return sheet;}
+    static SeriesDialog show(TvActivity activity,Api.Series series,LibraryRepository library){SeriesDialog sheet=new SeriesDialog(activity,series,library);sheet.show(null);return sheet;}
+    static void showAfterMissingResume(TvActivity activity, Api.Series series, LibraryRepository library,
+                                       SeriesEpisodes available) {
+        new SeriesDialog(activity, series, library).show(available);
+    }
     private final TvActivity activity;
     private Api.Series series;
     private final LibraryRepository library;
@@ -42,10 +46,12 @@ final class SeriesDialog {
     private boolean favoriteBusy;
     private boolean favoriteKnown;
     private boolean saved;
+    private boolean missingResume;
     private String intro="";
     private final Runnable updated=this::render;
     private SeriesDialog(TvActivity a,Api.Series s,LibraryRepository l){activity=a;series=s;library=l;intro=s.intro;api=new Api(a);seasons=new SeasonRepository(api);}
-    private void show(){
+    private void show(SeriesEpisodes available){
+        missingResume = available != null;
         LinearLayout page=TvUi.column(activity);page.setBackground(TvFocus.round(activity,20,TvUi.BG,0xFF3D4D64,1));page.setPadding(dp(28),dp(24),dp(28),dp(24));
         LinearLayout top=TvUi.row(activity);top.addView(TvUi.heading(activity,"故事详情",22),new LinearLayout.LayoutParams(0,-2,1));top.addView(TvUi.button(activity,"关闭",false,()->dialog.dismiss()));page.addView(top);
         status=TvUi.text(activity,"正在加载剧集…",15,TvUi.DIM);status.setPadding(0,dp(12),0,dp(12));page.addView(status);
@@ -53,25 +59,33 @@ final class SeriesDialog {
         dialog=new AlertDialog.Builder(activity).create();dialog.setView(page,0,0,0,0);dialog.setOnDismissListener(d->{dismissed=true;generation++;library.unobserve(updated);loader.shutdownNow();});dialog.show();
         if(dialog.getWindow()!=null){dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);dialog.getWindow().setLayout(dp(800),Math.min(dp(480),(int)(activity.getResources().getDisplayMetrics().heightPixels*.9f)));}
         library.observe(updated);render();
-        loadCurrent();
+        loadCurrent(available);
     }
     private boolean active(int request,String sid){return !dismissed&&!activity.isFinishing()&&!activity.isDestroyed()&&request==generation&&series.seriesId.equals(sid);}
-    private void loadCurrent(){
+    private void loadCurrent(SeriesEpisodes available){
         final int request=++generation;final Api.Series selected=series;final String sid=selected.seriesId;
         status.setText("正在加载这一季…");favoriteBusy=false;favoriteKnown=false;saved=false;
         library.loadFavorite(selected,result->{if(!active(request,sid))return;favoriteKnown=result.known;saved=result.enabled;render();});
         loadOverview(false,request,sid);
         loader.execute(()->{
             try{
-                JSONObject response=api.episodes(sid);JSONArray rows=Api.parseEpisodes(response,sid);
-                JSONObject data=response.optJSONObject("data"),node=data==null?null:data.optJSONObject(sid),vd=node==null?null:node.optJSONObject("video_data");
-                String plot=vd==null?selected.intro:vd.optString("series_intro",selected.intro);
-                String title=vd==null?selected.title:vd.optString("series_title",selected.title),cover=vd==null?selected.cover:vd.optString("series_cover",selected.cover);
+                SeriesEpisodes result = available == null ? SeriesEpisodes.load(api::episodes, selected) : available;
                 Account snapshot=Account.load(activity);
                 if(snapshot.loggedIn()){
                     try{WatchRecord remote=new AccountApi(activity).resume(snapshot,sid);if(remote!=null&&snapshot.sessionIdentity().equals(Account.load(activity).sessionIdentity()))library.store().merge(snapshot.libraryKey(),remote,false);}catch(Exception ignored){ }
                 }
-                activity.runOnUiThread(()->{if(!active(request,sid))return;episodes=rows;intro=plot;series.episodeCount=rows.length();if(!title.isEmpty())series.title=title;if(!cover.isEmpty())series.cover=cover;status.setText(rows.length()==0?"暂时没有可播放的剧集。":"选择任意一集，或切换其他季继续看。");render();});
+                activity.runOnUiThread(() -> {
+                    if (!active(request, sid)) return;
+                    episodes = result.rows;
+                    intro = result.intro;
+                    series.episodeCount = episodes.length();
+                    if (!result.title.isEmpty()) series.title = result.title;
+                    if (!result.cover.isEmpty()) series.cover = result.cover;
+                    if (episodes.length() == 0) status.setText(missingResume ? "上次观看的集数暂不可播放，暂无其他可选集数。" : "暂时没有可播放的剧集。");
+                    else if (missingResume) status.setText("上次观看的集数暂不可播放，请重新选集。");
+                    else status.setText("选择任意一集，或切换其他季继续看。");
+                    render();
+                });
             }catch(Exception e){activity.runOnUiThread(()->{if(active(request,sid))status.setText("这一季暂时加载失败，可以切换其他季或关闭后重试。");});}
         });
     }
@@ -81,7 +95,7 @@ final class SeriesDialog {
     }
     private void selectSeason(Api.Series selected){
         if(dismissed||selected.seriesId.equals(series.seriesId))return;
-        series=selected;intro=selected.intro;episodes=new JSONArray();render();loadCurrent();
+        missingResume=false;series=selected;intro=selected.intro;episodes=new JSONArray();render();loadCurrent(null);
     }
     private void render(){
         if(dismissed||body==null)return;View old=dialog.getCurrentFocus();Object tag=old==null?null:old.getTag();body.removeAllViews();
@@ -89,13 +103,25 @@ final class SeriesDialog {
         TextView title=TvUi.heading(activity,series.title,27);title.setMaxLines(2);title.setEllipsize(android.text.TextUtils.TruncateAt.END);copy.addView(title);TextView meta=TvUi.text(activity,(series.episodeCount>0?"全 "+series.episodeCount+" 集":"剧集信息")+(!series.category.isEmpty()?"  ·  "+series.category:""),15,TvUi.ACCENT);meta.setPadding(0,dp(10),0,dp(10));copy.addView(meta);
         TextView plot=TvUi.text(activity,intro.isEmpty()?"从第一集开始，看看这个故事。":intro,16,TvUi.DIM);plot.setMaxLines(3);plot.setEllipsize(android.text.TextUtils.TruncateAt.END);copy.addView(plot);hero.addView(copy,new LinearLayout.LayoutParams(0,-2,1));body.addView(hero);
         List<List<View>> focus=new ArrayList<>();LinearLayout actions=TvUi.row(activity);actions.setPadding(0,dp(20),0,dp(22));List<View> buttons=new ArrayList<>();WatchRecord record=library.store().find(library.owner(),series.seriesId);
-        if(record!=null){TextView resume=TvUi.button(activity,"继续第 "+record.episode+" 集 · "+TvUi.time(record.position),true,()->play(record.episode,record.position));resume.setTag("detail-resume");resume.setEnabled(episodes.length()>0);actions.addView(resume);buttons.add(resume);}
-        TextView first=TvUi.button(activity,record==null?"立即播放":"从第一集看",record==null,()->play(1,0));first.setTag("detail-first");first.setEnabled(episodes.length()>0);TvUi.margins(first,activity,record!=null?12:0,0,12,0);actions.addView(first);buttons.add(first);
+        boolean showResume = record != null && !missingResume;
+        if(showResume){TextView resume=TvUi.button(activity,"继续第 "+record.episode+" 集 · "+TvUi.time(record.position),true,()->play(record.episode,record.position));resume.setTag("detail-resume");resume.setEnabled(episodes.length()>0);actions.addView(resume);buttons.add(resume);}
+        JSONObject firstEpisode = episodes.optJSONObject(0);
+        if (!missingResume) {
+            int firstNumber = firstEpisode == null ? 1 : firstEpisode.optInt("num", 1);
+            String firstLabel = record == null ? "立即播放" : firstNumber == 1 ? "从第一集看" : "从第 " + firstNumber + " 集看";
+            TextView first=TvUi.button(activity,firstLabel,record==null,()->play(firstNumber,0));first.setTag("detail-first");first.setEnabled(firstEpisode!=null);TvUi.margins(first,activity,showResume?12:0,0,12,0);actions.addView(first);buttons.add(first);
+        }
         TextView favorite=TvUi.button(activity,!favoriteKnown?"确认追剧状态":saved?"已追剧":"加入追剧",false,()->favorite(!saved));favorite.setTag("detail-favorite");favorite.setEnabled(!favoriteBusy);actions.addView(favorite);buttons.add(favorite);body.addView(actions);focus.add(buttons);
         renderSeasons(focus);
         TextView heading=TvUi.heading(activity,"选集",19);heading.setPadding(0,0,0,dp(12));body.addView(heading);
         for(int from=0;from<episodes.length();from+=10){LinearLayout row=TvUi.row(activity);List<View> cells=new ArrayList<>();for(int i=0;i<10;i++){JSONObject episode=episodes.optJSONObject(from+i);if(episode==null)break;int number=episode.optInt("num",from+i+1);TextView button=TvUi.tab(activity,String.format(java.util.Locale.US,"%02d",number),record!=null&&record.episode==number,()->play(number,0));button.setPadding(0,0,0,0);button.setTag("detail-ep:"+number);button.setContentDescription("播放第 "+number+" 集");LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(44),1);p.setMargins(0,0,dp(8),dp(8));row.addView(button,p);cells.add(button);}for(int i=cells.size();i<10;i++)row.addView(new View(activity),new LinearLayout.LayoutParams(0,1,1));body.addView(row);focus.add(cells);}
-        TvFocus.linkRows(focus);if(tag!=null){View restored=body.findViewWithTag(tag);if(restored!=null)restored.requestFocus();}else if(episodes.length()>0&&!buttons.isEmpty())buttons.get(0).requestFocus();
+        TvFocus.linkRows(focus);
+        View restored = tag == null ? null : body.findViewWithTag(tag);
+        if (restored != null) restored.requestFocus();
+        else if (missingResume && firstEpisode != null) {
+            View firstSelection = body.findViewWithTag("detail-ep:" + firstEpisode.optInt("num", 1));
+            if (firstSelection != null) firstSelection.requestFocus();
+        } else if (episodes.length() > 0 && !buttons.isEmpty()) buttons.get(0).requestFocus();
     }
     private void renderSeasons(List<List<View>> focus){
         if(!seasonsLoading&&seasonError.isEmpty()&&(overview==null||"single".equals(overview.status)))return;
@@ -121,9 +147,9 @@ final class SeriesDialog {
         library.favorite(series,enabled,result->{if(!active(request,sid))return;favoriteBusy=false;favoriteKnown=result.known;if(result.known)saved=result.enabled;status.setText(result.ok()?(result.enabled?"已加入追剧":"已取消追剧"):result.error);render();});
     }
     private void play(int episode,long position){
-        int index=-1;for(int i=0;i<episodes.length();i++){JSONObject row=episodes.optJSONObject(i);if(row!=null&&row.optInt("num",i+1)==episode){index=i;break;}}
-        if(index<0){status.setText("这一集暂时不可播放，请重新选集。");return;}
-        Intent intent=PlayerActivity.intent(activity,series.seriesId,series.title,series.cover,episodes.toString());intent.putExtra(PlayerActivity.EXTRA_START_INDEX,index);intent.putExtra("start_position_ms",position);dialog.dismiss();activity.startActivity(intent);
+        Intent intent = SeriesEpisodes.playback(activity, series, episodes, episode, position);
+        if(intent==null){status.setText("这一集暂时不可播放，请重新选集。");return;}
+        dialog.dismiss();activity.startActivity(intent);
     }
     private int dp(int value){return TvUi.dp(activity,value);}
 }

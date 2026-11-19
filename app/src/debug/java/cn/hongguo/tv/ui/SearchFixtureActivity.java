@@ -4,6 +4,7 @@ import android.os.Bundle;
 import java.io.IOException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -13,10 +14,13 @@ import cn.hongguo.tv.account.Account;
 public final class SearchFixtureActivity extends SearchActivity {
     public static final String SLOW_QUERY = "慢查询 A";
     public static final String FAST_QUERY = "成功查询 B";
+    public static final String RETRY_QUERY = "再次查询";
+    public static final String EMPTY_QUERY = "没有结果";
     public static final String RESULT_TITLE = "新查询的受控结果";
     public final CountDownLatch slowStarted = new CountDownLatch(1);
     public final CountDownLatch releaseSlow = new CountDownLatch(1);
     public final AtomicReference<Thread> slowThread = new AtomicReference<>();
+    public final AtomicInteger retryRequests = new AtomicInteger();
     public boolean slowSuccess;
 
     @Override protected void onCreate(Bundle saved) {
@@ -34,6 +38,11 @@ public final class SearchFixtureActivity extends SearchActivity {
             return success("已结束页面的旧结果");
         }
         if (FAST_QUERY.equals(query)) return success(RESULT_TITLE);
+        if (EMPTY_QUERY.equals(query)) return new JSONObject().put("code", 0);
+        if (RETRY_QUERY.equals(query)) {
+            if (retryRequests.incrementAndGet() == 1) throw new IOException("受控网络错误");
+            return success(RESULT_TITLE);
+        }
         throw new IOException("未定义的受控查询");
     }
 

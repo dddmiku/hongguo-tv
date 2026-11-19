@@ -97,6 +97,29 @@ public class PlayerControlsDeviceTest extends InstrumentationTestCase {
         assertTrue("未处理的按键改变了播放状态", main(() -> decoder.isPlaying()));
     }
 
+    public void testHeldSelectDoesNotTogglePlaybackAgain() {
+        press(KeyEvent.KEYCODE_DPAD_CENTER);
+        assertFalse(main(() -> decoder.isPlaying()));
+        assertTrue(dispatch(KeyEvent.KEYCODE_DPAD_CENTER, 1));
+        assertTrue(dispatch(KeyEvent.KEYCODE_DPAD_CENTER, 2));
+        assertFalse("长按确定键再次切换了播放状态", main(() -> decoder.isPlaying()));
+        assertTrue(dispatch(KeyEvent.KEYCODE_BUTTON_A, 0));
+        assertTrue("手柄选择键没有恢复播放", main(() -> decoder.isPlaying()));
+    }
+
+    public void testHeldDirectionContinuesSeeking() {
+        assertTrue(dispatch(KeyEvent.KEYCODE_DPAD_RIGHT, 0));
+        assertTrue(dispatch(KeyEvent.KEYCODE_DPAD_RIGHT, 1));
+        assertEquals(2, (int) main(() -> decoder.seeks));
+    }
+
+    private boolean dispatch(int keyCode, int repeat) {
+        return main(() -> {
+            long now = SystemClock.uptimeMillis();
+            return player.onKeyDown(keyCode, new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, repeat));
+        });
+    }
+
     private long press(int keyCode) {
         return main(() -> {
             long now = SystemClock.uptimeMillis();
@@ -153,11 +176,12 @@ public class PlayerControlsDeviceTest extends InstrumentationTestCase {
     /** No source is attached and start() never invokes native playback, so this fixture is silent. */
     private static final class SilentPlayer extends MediaPlayer {
         private boolean playing = true;
+        private int seeks;
         @Override public boolean isPlaying() { return playing; }
         @Override public int getCurrentPosition() { return 4321; }
         @Override public int getDuration() { return 60000; }
         @Override public void pause() { playing = false; }
         @Override public void start() { playing = true; }
-        @Override public void seekTo(int position) { }
+        @Override public void seekTo(int position) { seeks++; }
     }
 }
