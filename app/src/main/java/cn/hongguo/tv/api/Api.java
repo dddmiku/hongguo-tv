@@ -278,73 +278,128 @@ public final class Api {
         return p;
     }
 
-    /**
-     * 榜单。
-     *
-     * board 取值：recommend / hot / new（对应上游的 sub_selected_items）。
-     * 榜单接口和推荐流是两个不同端点：这个走 bookmall/cell/change/v。
-     */
+    /** Original comic boards remain available to older callers. */
     public List<Series> rank(String board, int limit) throws IOException {
-        Map<String, String> subs = new LinkedHashMap<>();
-        subs.put("recommend", "comic_series_hot_rank");
-        subs.put("hot", "comic_series_hot_play");
-        subs.put("new", "comic_series_new_rank");
-        String sub = subs.containsKey(board) ? subs.get(board) : board;
+        return rank("comic", board, limit);
+    }
 
+    /** Official series-album or comic ranking; never substitutes a browse sort. */
+    public List<Series> rank(String category, String board, int limit) throws IOException {
         List<Series> out = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
         int offset = 0;
-        String sess = UUID.randomUUID().toString();
-        // 榜单同样要翻页；上限 6 页兜底，避免上游异常时死循环
+        String session = UUID.randomUUID().toString();
         for (int page = 0; page < 6 && out.size() < limit; page++) {
-            Map<String, String> q = new LinkedHashMap<>();
-            q.put("cell_id", COMIC_RANK_CELL);
-            q.put("tab_type", "26");
-            q.put("client_req_type", "2");
-            q.put("client_template", "2");
-            q.put("screen_width_px", "1350");
-            q.put("selected_items", "comic_series_rank");
-            q.put("sub_selected_items", sub);
-            q.put("session_uuid", sess);
-            if (offset > 0) {
-                q.put("offset", String.valueOf(offset));
+            if (Thread.currentThread().isInterrupted()) throw new IOException("榜单请求已取消");
+            RankPage batch = rankPage(get("/reading/bookapi/bookmall/cell/change/v",
+                    rankQuery(category, board, offset, session)), category, offset);
+            for (Series series : batch.items) if (seen.add(series.seriesId)) {
+                series.rank = out.size() + 1;
+                out.add(series);
             }
-            JSONObject j = get("/reading/bookapi/bookmall/cell/change/v", q);
-            JSONObject data = j.optJSONObject("data");
-            JSONObject cv = data == null ? null : data.optJSONObject("cell_view");
-            JSONArray cells = cv == null ? null : cv.optJSONArray("cell_data");
-            if (cells == null || cells.length() == 0) {
-                break;
-            }
-            for (int i = 0; i < cells.length(); i++) {
-                JSONObject item = cells.optJSONObject(i);
-                if (item == null) {
-                    continue;
-                }
-                Object raw = item.opt("video_data");
-                JSONObject v = null;
-                if (raw instanceof JSONArray) {
-                    JSONArray arr = (JSONArray) raw;
-                    v = arr.length() > 0 ? arr.optJSONObject(0) : null;
-                } else if (raw instanceof JSONObject) {
-                    v = (JSONObject) raw;
-                }
-                Series s = Series.from(v);
-                if (s != null && seen.add(s.seriesId)) {
-                    s.rank = out.size() + 1;
-                    out.add(s);
-                }
-            }
-            if (!cv.optBoolean("has_more", false)) {
-                break;
-            }
-            offset = cv.optInt("next_offset", offset + cells.length());
+            if (!batch.hasMore) break;
+            offset = batch.nextOffset;
         }
-        return out.size() > limit ? out.subList(0, limit) : out;
+        return out.size() > limit ? new ArrayList<>(out.subList(0, limit)) : out;
     }
 
-    /** 榜单 cell id（上游固定值）。 */
-    private static final String COMIC_RANK_CELL = "7470092475068071998";
+    /** Confirmed from the upstream ranking selector and live responses. */
+    public static Map<String, String> rankQuery(String category, String board, int offset, String session) {
+        String selected, sub;
+        if ("series".equals(category)) {
+            selected = "series_album";
+            if ("recommend".equals(board)) sub = "series_album_hot_sc";
+            else if ("new".equals(board)) sub = "series_album_new_rank";
+            else throw new IllegalArgumentException("系列剧不支持该榜单");
+        } else if ("comic".equals(category)) {
+            selected = "comic_series_rank";
+            if ("recommend".equals(board)) sub = "comic_series_hot_rank";
+            else if ("hot".equals(board)) sub = "comic_series_hot_play";
+            else if ("new".equals(board)) sub = "comic_series_new_rank";
+            else throw new IllegalArgumentException("漫剧不支持该榜单");
+        } else throw new IllegalArgumentException("不支持的榜单分类");
+        Map<String, String> query = new LinkedHashMap<>();
+        query.put("cell_id", "7470092475068071998");
+        query.put("tab_type", "26");
+        query.put("client_req_type", "2");
+        query.put("client_template", "2");
+        query.put("screen_width_px", "1350");
+        query.put("selected_items", selected);
+        query.put("sub_selected_items", sub);
+        query.put("session_uuid", session);
+        if (offset > 0) query.put("offset", String.valueOf(offset));
+        return query;
+    }
+
+    public static final class RankPage {
+        public final List<Series> items = new ArrayList<>();
+        public int nextOffset;
+        public boolean hasMore;
+    }
+
+    /** Parse one upstream page without losing its raw-row pagination cursor. */
+    public static RankPage rankPage(JSONObject reply, String category, int offset) throws IOException {
+        JSONObject data = reply == null ? null : reply.optJSONObject("data");
+        JSONObject view = data == null ? null : data.optJSONObject("cell_view");
+        JSONArray cells = view == null ? null : view.optJSONArray("cell_data");
+        if (reply == null || reply.optInt("code", -1) != 0 || cells == null)
+            throw new IOException("榜单暂时无法读取");
+        RankPage page = new RankPage();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (int index = 0; index < cells.length(); index++) {
+            JSONObject cell = cells.optJSONObject(index);
+            Object raw = cell == null ? null : cell.opt("video_data");
+            JSONObject video = raw instanceof JSONArray ? ((JSONArray) raw).optJSONObject(0)
+                    : raw instanceof JSONObject ? (JSONObject) raw : null;
+            Series series = Series.from(video);
+            if (series == null) continue;
+            if ("series".equals(category)) {
+                String entry = seriesEntry(video.optString("jump_schema", ""));
+                if (!entry.isEmpty() && !entry.equals(series.seriesId)) {
+                    series.seriesId = entry;
+                    // The ranking card describes the newest season; its entry opens season one.
+                    series.episodeCount = 0;
+                }
+            }
+            if (!seen.add(series.seriesId)) continue;
+            JSONArray subtitles = video.optJSONArray("sub_title_list");
+            if (subtitles != null) {
+                StringBuilder joined = new StringBuilder();
+                for (int label = 0; label < subtitles.length(); label++) {
+                    JSONObject item = subtitles.optJSONObject(label);
+                    String text = item == null ? "" : item.optString("content", "").trim();
+                    if (!text.isEmpty()) {
+                        if (joined.length() > 0) joined.append(" · ");
+                        joined.append(text);
+                    }
+                }
+                series.category = joined.toString();
+            }
+            JSONObject rec = video.optJSONObject("rec_text_item");
+            if (rec != null) series.hot = rec.optString("RecommendText", series.hot);
+            page.items.add(series);
+        }
+        page.nextOffset = view.optInt("next_offset", offset + cells.length());
+        page.hasMore = cells.length() > 0 && view.optBoolean("has_more", false) && page.nextOffset > offset;
+        return page;
+    }
+
+    /** Only the confirmed in-app route and a numeric series id can change the playback target. */
+    private static String seriesEntry(String schema) {
+        try {
+            java.net.URI uri = new java.net.URI(schema);
+            if (!"dragon8662".equals(uri.getScheme()) || !"videoDetail".equals(uri.getHost())) return "";
+            String query = uri.getRawQuery();
+            if (query == null) return "";
+            for (String part : query.split("&")) {
+                String[] pair = part.split("=", 2);
+                if (pair.length != 2 || !"video_series_id".equals(java.net.URLDecoder.decode(pair[0], "UTF-8"))) continue;
+                String id = java.net.URLDecoder.decode(pair[1], "UTF-8");
+                return id.matches("[0-9]{1,32}") ? id : "";
+            }
+        } catch (Exception ignored) { }
+        return "";
+    }
 
     /** 体裁 → 上游 req_scene / genre 值。 */
     public static final String[][] GENRES = {

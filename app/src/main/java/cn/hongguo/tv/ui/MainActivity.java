@@ -82,6 +82,7 @@ public class MainActivity extends TvActivity {
         View old=getCurrentFocus();String oldTag=old==null?null:old.getTag() instanceof String?(String)old.getTag():null;header.removeAllViews();navigation.clear();
         LinearLayout brand=TvUi.column(this);TextView name=TvUi.heading(this,"红果客厅",22);name.setTextColor(TvUi.ACCENT);brand.addView(name);TextView hint=TvUi.text(this,"让故事占满这一刻",11,TvUi.DIM);hint.setPadding(0,dp(4),0,0);brand.addView(hint);header.addView(brand,new LinearLayout.LayoutParams(dp(144),-2));
         addNav("精选",page==0,()->switchPage(0),"nav-home");addNav("片库",page==1,()->switchPage(1),"nav-browse");
+        addNav("排行",false,()->{userNavigated=true;startActivity(new Intent(this,RankingsActivity.class));},"nav-rank");
         addNav("追剧",false,()->startActivity(LibraryActivity.intent(this,true)),"nav-favorites");addNav("历史",false,()->startActivity(LibraryActivity.intent(this,false)),"nav-history");
         header.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
         addNav("搜索",false,()->startActivity(new Intent(this,SearchActivity.class)),"nav-search");

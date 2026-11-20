@@ -2,5 +2,7 @@
     <application android:label="红果TV验收" android:usesCleartextTraffic="true" tools:replace="android:label,android:usesCleartextTraffic">
         <activity android:name="cn.hongguo.tv.ui.SeasonPlayerFixtureActivity" android:configChanges="orientation|screenSize|keyboardHidden" android:exported="false" android:screenOrientation="landscape" />
         <activity android:name="cn.hongguo.tv.ui.SearchFixtureActivity" android:configChanges="orientation|screenSize|keyboardHidden" android:exported="false" android:screenOrientation="landscape" />
+        <activity android:name="cn.hongguo.tv.ui.RankingsFixtureActivity" android:configChanges="orientation|screenSize|keyboardHidden" android:exported="false" android:screenOrientation="landscape" />
+        <activity android:name="cn.hongguo.tv.ui.RankingsLiveFixtureActivity" android:configChanges="orientation|screenSize|keyboardHidden" android:exported="false" android:screenOrientation="landscape" />
     </application>
 </manifest>

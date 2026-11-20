@@ -80,6 +80,12 @@
             android:grantUriPermissions="true" />
 
         <activity
+            android:name=".ui.RankingsActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"
+            android:screenOrientation="landscape" />
+
+        <activity
             android:name=".ui.SearchActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="false"
