@@ -51,12 +51,12 @@ public class MainActivity extends TvActivity {
     private String theme="",sort="hot_score",themeName="全部题材";
     private int generation;
     private boolean initiallyFocused,userNavigated,loadingMore;
+    private boolean moreAvailable;
     private boolean resumed;
     private ResumeRequest resumeRequest;
     private final Runnable libraryChanged=()->{if(!isFinishing()&&!isDestroyed()){updateAccount();if(page==0)render();}};
     private boolean updateUiBusy;
-    private java.io.File pendingApk;
-    private String pendingApkVersion="";
+    private final cn.hongguo.tv.update.ApkInstaller.Handoff updateHandoff = new cn.hongguo.tv.update.ApkInstaller.Handoff();
 
     @Override protected void onCreate(Bundle saved){
         super.onCreate(saved);cn.hongguo.tv.sign.RequestSigner.bind(this);
@@ -64,6 +64,7 @@ public class MainActivity extends TvActivity {
         resumeSource = api::episodes;
         if(saved!=null){page=saved.getInt("page");genre=saved.getInt("genre");theme=saved.getString("theme","");themeName=saved.getString("themeName","全部题材");sort=saved.getString("sort","hot_score");}
         buildUi();load(false);loadThemes();autoCheckUpdate();
+        cn.hongguo.tv.update.ApkInstaller.cleanOld(this);
         if(cn.hongguo.tv.BuildConfig.DEBUG){android.util.DisplayMetrics metrics=getResources().getDisplayMetrics();Log.i("HgQA","density="+metrics.density+" scaled="+metrics.scaledDensity+" fontScale="+getResources().getConfiguration().fontScale);}
 
     }
@@ -101,15 +102,16 @@ public class MainActivity extends TvActivity {
 
     private void load(boolean refresh){
         final int request=++generation,selectedGenre=genre;final String selectedTheme=theme,selectedSort=sort;final int selectedPage=page;
-        offset=0;loadingMore=false;sections.clear();
+        offset=0;loadingMore=false;moreAvailable=false;sections.clear();
         String[] ordering=page==0?new String[]{"hot_score","online_time"}:new String[]{sort};
         for(String order:ordering){List<Api.Series> hit=catalogs.cached(genre,page==0?"":theme,order);if(!hit.isEmpty())sections.put(order,hit);}
         render();setStatus(sections.isEmpty()?"正在找好故事…":"片单已就绪，正在刷新。");
         for(String order:ordering)loaders.execute(()->{
             try{
-                List<Api.Series> items=api.browse(selectedGenre,selectedPage==0?"":selectedTheme,order,0,18);
+                Api.BrowsePage batch=api.browse(selectedGenre,selectedPage==0?"":selectedTheme,order,0,18);
+                List<Api.Series> items=batch.items;
                 if(!items.isEmpty())catalogs.save(selectedGenre,selectedPage==0?"":selectedTheme,order,items);
-                runOnUiThread(()->{if(request!=generation||isDestroyed())return;if(!items.isEmpty())sections.put(order,items);render();setStatus(items.isEmpty()?"这个分类暂时没有内容，试试其他题材。":selectedPage==0?"精选好剧 · "+GENRES[selectedGenre]:GENRES[selectedGenre]+" · "+themeName);});
+                runOnUiThread(()->{if(request!=generation||isDestroyed())return;if(selectedPage==1){offset=batch.nextOffset;moreAvailable=batch.hasMore;}if(!items.isEmpty()||batch.hasMore)sections.put(order,items);render();setStatus(items.isEmpty()?"这个分类暂时没有内容，试试其他题材。":selectedPage==0?"精选好剧 · "+GENRES[selectedGenre]:GENRES[selectedGenre]+" · "+themeName);});
             }catch(Exception e){runOnUiThread(()->{if(request==generation&&!isDestroyed()){setStatus(sections.isEmpty()?"片单暂时加载失败，按下方重试。":"暂时无法刷新，已保留当前片单。" );render();}});}
         });
     }
@@ -279,11 +281,41 @@ public class MainActivity extends TvActivity {
     private void addTheme(LinearLayout row,List<View> focus,String name,String id){TextView b=TvUi.tab(this,name,theme.equals(id),()->{theme=id;themeName=name;load(false);});b.setTag("theme:"+id);row.addView(b);focus.add(b);}
     private void grid(List<Api.Series> items){
         final int cols=5;for(int from=0;from<items.size();from+=cols){LinearLayout row=TvUi.row(this);List<View> focus=new ArrayList<>();for(int i=0;i<cols;i++){if(from+i<items.size()){View card=card(items.get(from+i),146,"browse");LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,-2,1);p.setMargins(0,0,i==cols-1?0:dp(14),dp(16));row.addView(card,p);focus.add(card);}else row.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));}content.addView(row);focusRows.add(focus);}
-        TextView more=TvUi.button(this,loadingMore?"加载中…":"查看更多",false,this::loadMore);more.setTag("catalog-more");more.setEnabled(!loadingMore);content.addView(more,new LinearLayout.LayoutParams(dp(160),dp(44)));focusRows.add(java.util.Collections.singletonList(more));
+        if (moreAvailable) {
+            TextView more=TvUi.button(this,loadingMore?"加载中…":"查看更多",false,this::loadMore);more.setTag("catalog-more");more.setEnabled(!loadingMore);content.addView(more,new LinearLayout.LayoutParams(dp(160),dp(44)));focusRows.add(java.util.Collections.singletonList(more));
+        }
     }
     private void loadMore(){
-        if(loadingMore)return;loadingMore=true;final int request=generation;List<Api.Series> current=sections.get(sort);final int start=current==null?0:current.size();final int g=genre;final String t=theme,s=sort;render();
-        loaders.execute(()->{try{List<Api.Series> next=api.browse(g,t,s,start,18);runOnUiThread(()->{if(request!=generation||isDestroyed())return;loadingMore=false;List<Api.Series> rows=sections.get(s);if(rows==null)return;java.util.Set<String> seen=new java.util.HashSet<>();for(Api.Series item:rows)seen.add(item.seriesId);int count=0;for(Api.Series item:next)if(seen.add(item.seriesId)){rows.add(item);count++;}render();setStatus(count==0?"已经看到这一分类的末尾。":"已加载 "+rows.size()+" 部作品");});}catch(Exception e){runOnUiThread(()->{if(request==generation&&!isDestroyed()){loadingMore=false;render();setStatus("下一页暂时加载失败，可以再次点查看更多。" );}});}});
+        if (loadingMore || !moreAvailable) return;
+        loadingMore = true;
+        int request = generation, start = offset, selectedGenre = genre;
+        String selectedTheme = theme, selectedSort = sort;
+        render();
+        loaders.execute(() -> {
+            try {
+                Api.BrowsePage next = api.browse(selectedGenre, selectedTheme, selectedSort, start, 18);
+                runOnUiThread(() -> {
+                    if (request != generation || isFinishing() || isDestroyed()) return;
+                    loadingMore = false;
+                    offset = next.nextOffset;
+                    moreAvailable = next.hasMore;
+                    List<Api.Series> rows = sections.get(selectedSort);
+                    if (rows == null) return;
+                    java.util.Set<String> seen = new java.util.HashSet<>();
+                    for (Api.Series item : rows) seen.add(item.seriesId);
+                    for (Api.Series item : next.items) if (seen.add(item.seriesId)) rows.add(item);
+                    render();
+                    setStatus(moreAvailable ? "已加载 " + rows.size() + " 部作品" : "已经看到这一分类的末尾。");
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    if (request != generation || isFinishing() || isDestroyed()) return;
+                    loadingMore = false;
+                    render();
+                    setStatus("下一页暂时加载失败，可以再次点查看更多。");
+                });
+            }
+        });
     }
 
     private void autoCheckUpdate(){long previous=getPreferences(0).getLong("update_checked",0);if(System.currentTimeMillis()-previous<86400000)return;new Thread(()->{cn.hongguo.tv.update.Updater.Result result=cn.hongguo.tv.update.Updater.check(this);runOnUiThread(()->{if(isDestroyed())return;if(result.ok)getPreferences(0).edit().putLong("update_checked",System.currentTimeMillis()).apply();if(result.updateAvailable){updateBtn.setText("更新 •");updateBtn.setTextColor(TvUi.ACCENT);}});},"tv-update-check").start();}
@@ -298,39 +330,15 @@ public class MainActivity extends TvActivity {
     // Existing update download, checksum and unknown-source handoff are appended below.
 
     private void resumePendingInstall() {
-        // 1) 先清理：本地版本已经 >= 待装版本，说明刚才装成功了。
-        java.io.File apk = pendingApk;
-        if (apk != null) {
-            String local = cn.hongguo.tv.update.Updater.currentVersion(this);
-            if (!pendingApkVersion.isEmpty()
-                    && cn.hongguo.tv.update.Updater.compare(local, pendingApkVersion) >= 0) {
-                Log.i(TAG, "安装已完成（本地 " + local + "），清理安装包");
-                cn.hongguo.tv.update.ApkInstaller.cleanOld(this, null);
-                pendingApk = null;
-                pendingApkVersion = "";
-                apk = null;
-            }
-        } else {
-            // 没有待装包时也顺手清一次启动残留（上次装完没清掉的）。
-            cn.hongguo.tv.update.ApkInstaller.cleanOld(this, null);
+        if (updateHandoff.resume(this) == cn.hongguo.tv.update.ApkInstaller.InstallResult.FAILED) {
+            setStatus("无法安装更新，请重新检查更新。");
         }
+    }
 
-        if (apk == null || !apk.isFile() || apk.length() == 0) {
-            return;
-        }
-        try {
-            boolean canInstall = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O
-                    || getPackageManager().canRequestPackageInstalls();
-            if (!canInstall) {
-                // 还没授权：说明用户刚才是取消了授权页，保持现状等他再点。
-                return;
-            }
-            Log.i(TAG, "回到前台，续装 " + apk.getName()
-                    + (pendingApkVersion.isEmpty() ? "" : "（" + pendingApkVersion + "）"));
-            setStatus("正在安装 " + pendingApkVersion + "…");
-            cn.hongguo.tv.update.ApkInstaller.install(this, apk);
-        } catch (Throwable e) {
-            Log.w(TAG, "续装失败", e);
+    private void startInstall(java.io.File apk, String version) {
+        if (!resumed || isFinishing() || isDestroyed()) return;
+        if (updateHandoff.start(this, apk, version) == cn.hongguo.tv.update.ApkInstaller.InstallResult.FAILED) {
+            setStatus("安装包与当前应用不匹配，或系统安装器不可用。");
         }
     }
 
@@ -348,8 +356,8 @@ public class MainActivity extends TvActivity {
             cn.hongguo.tv.update.Updater.Result r =
                     cn.hongguo.tv.update.Updater.check(this);
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
                 updateUiBusy = false;
+                if (!resumed || isFinishing() || isDestroyed()) return;
                 setStatus(r.message());
                 if (!r.ok) {
                     new android.app.AlertDialog.Builder(this)
@@ -412,18 +420,11 @@ public class MainActivity extends TvActivity {
             java.io.File cached =
                     cn.hongguo.tv.update.ApkInstaller.findPending(this, r.latest);
             if (cached != null
-                    && (r.sha256.isEmpty() || sha256Matches(cached, r.sha256))) {
+                    && cached.length() == r.size && sha256Matches(cached, r.sha256)) {
                 Log.i(TAG, "复用已下载的安装包 " + cached.getName());
-                pendingApk = cached;
-                pendingApkVersion = r.latest;
                 setStatus("已下载完成，正在安装 " + r.latest + "…");
-                cn.hongguo.tv.update.ApkInstaller.install(this, cached);
+                startInstall(cached, r.latest);
                 return;
-            }
-            if (cached != null) {
-                // 文件在但校验不过（下载被截断/被替换），删掉重下。
-                Log.w(TAG, "缓存安装包校验失败，删除后重下");
-                cached.delete();
             }
             downloadThenInstall(r);
     }
@@ -445,7 +446,7 @@ public class MainActivity extends TvActivity {
         pd.show();
 
         new Thread(() -> cn.hongguo.tv.update.ApkInstaller.download(
-                r.apkUrl, r.sha256, dst,
+                r.apkUrl, r.sha256, r.size, dst,
                 new cn.hongguo.tv.update.ApkInstaller.Progress() {
                     @Override
                     public void onProgress(int pct, long done, long total) {
@@ -481,10 +482,7 @@ public class MainActivity extends TvActivity {
                 if (isFinishing() || isDestroyed()) return;
                             pd.dismiss();
                             setStatus("下载完成，正在安装…");
-                            pendingApk = apk;
-                            pendingApkVersion = r.latest;
-                            cn.hongguo.tv.update.ApkInstaller.install(
-                                    MainActivity.this, apk);
+                            startInstall(apk, r.latest);
                         });
                     }
                 }), "update-download").start();

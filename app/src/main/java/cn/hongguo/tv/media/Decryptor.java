@@ -259,7 +259,7 @@ public final class Decryptor {
         return out;
     }
 
-    private static Box findFirst(byte[] d, int from, int to, String type) {
+    static Box findFirst(byte[] d, int from, int to, String type) {
         List<Box> l = findAll(d, from, to, type);
         return l.isEmpty() ? null : l.get(0);
     }
@@ -299,7 +299,7 @@ public final class Decryptor {
         return p + 4 <= d.length ? str(d, p) : "";
     }
 
-    private static String readVideoCodec(byte[] d, Box trak) {
+    static String readVideoCodec(byte[] d, Box trak) {
         Box stsd = findFirst(d, trak.start, trak.end, "stsd");
         if (stsd == null) {
             return "";
@@ -309,7 +309,12 @@ public final class Decryptor {
         if (p + 8 > d.length) {
             return "";
         }
-        return str(d, p + 4);   // sample entry 的 fourcc
+        String entry = str(d, p + 4);
+        if ("encv".equals(entry)) {
+            String original = originalFormat(d, p + BOX_HEADER, stsd.end, VISUAL_ENTRY_HEADER);
+            if (original != null && original.length() == 4) return original;
+        }
+        return entry;   // 普通 sample entry，或缺少 frma 时保留原值
     }
 
     /**
@@ -382,7 +387,7 @@ public final class Decryptor {
         int[] perChunk = new int[(int) chunks];
         if (stsc != null) {
             int sp = stsc.start + BOX_HEADER + 4;
-            if (sp + 4 > d.length) {
+            if (sp + 4 > stsc.end) {
                 return null;
             }
             long entries = u32(d, sp);
@@ -397,13 +402,17 @@ public final class Decryptor {
             long[] firstChunk = new long[(int) entries];
             long[] samplesPer = new long[(int) entries];
             for (int i = 0; i < entries; i++) {
-                if (eq + 12 > d.length) {
+                if (eq + 12 > stsc.end) {
                     return null;
                 }
                 firstChunk[i] = u32(d, eq);
                 samplesPer[i] = u32(d, eq + 4);
+                if (samplesPer[i] <= 0) {
+                    return null;
+                }
                 eq += 12;   // 跳过 sample_description_index
             }
+            if (!validChunkRunStarts(firstChunk, chunks)) return null;
             for (int i = 0; i < entries; i++) {
                 long from = firstChunk[i];
                 long to = i + 1 < entries ? firstChunk[i + 1] - 1 : chunks;
@@ -442,6 +451,17 @@ public final class Decryptor {
         st.sizes = sizes;
         st.offsets = offsets;
         return st;
+    }
+
+    /** Validate the one-based, strictly increasing run starts from an stsc table. */
+    static boolean validChunkRunStarts(long[] firstChunk, long chunks) {
+        if (firstChunk == null || firstChunk.length == 0 || chunks <= 0 || firstChunk[0] != 1) return false;
+        long previous = 0;
+        for (long first : firstChunk) {
+            if (first <= previous || first > chunks) return false;
+            previous = first;
+        }
+        return true;
     }
 
     // ---------------------------------------------------------------- 清信令
@@ -522,7 +542,11 @@ public final class Decryptor {
     /** 在 sample entry 里找 sinf/frma，返回原始 fourcc。 */
     private static String originalFormat(byte[] d, int from, int to) {
         // 音频 sample entry 固定 28 字节头之后是子盒
-        int p = from + AUDIO_ENTRY_HEADER;
+        return originalFormat(d, from, to, AUDIO_ENTRY_HEADER);
+    }
+
+    private static String originalFormat(byte[] d, int from, int to, int entryHeader) {
+        int p = from + entryHeader;
         while (p + BOX_HEADER <= to) {
             long size = u32(d, p);
             int header = BOX_HEADER;
@@ -575,21 +599,12 @@ public final class Decryptor {
      *
      * @param videoCodec 原始视频编码 fourcc（encv 时按实际编码决定改成什么）
      */
-    private static void stripEncryptionSignaling(byte[] d, String videoCodec) {
+    static void stripEncryptionSignaling(byte[] d, String videoCodec) {
         Box moov = findFirst(d, 0, d.length, "moov");
         if (moov == null) {
             return;
         }
-        // 视频轨的 sample entry 是 encv，要改成真实编码的 fourcc，
-        // 否则播放器仍按「加密视频」处理。
-        String target = "hvc1";
-        if (videoCodec != null) {
-            String c = videoCodec.toLowerCase(java.util.Locale.US);
-            if (c.equals("avc1") || c.equals("avc3") || c.equals("h264")) {
-                target = "avc1";
-            }
-        }
-        rewriteBoxTypes(d, moov.start, moov.end, "encv", target);
+        rewriteVideoEntry(d, moov, videoCodec);
         // 音频轨的 sample entry 是 enca（加密音频）。
         //
         // 之前只处理 encv 漏了 enca，后果是**视频能播但完全没声音**：
@@ -603,6 +618,19 @@ public final class Decryptor {
         for (String t : new String[]{"senc", "saiz", "saio", "sinf"}) {
             rewriteBoxTypes(d, moov.start, moov.end, t, "free");
         }
+    }
+
+    /** Rewrite encrypted video entries using the original codec from this track's frma box. */
+    static void rewriteVideoEntry(byte[] d, Box moov, String videoCodec) {
+        // Only a sample-entry type can be rewritten; never scan compressed mdat payloads.
+        String target = "hvc1";
+        if (videoCodec != null) {
+            String codec = videoCodec.toLowerCase(java.util.Locale.US);
+            if (codec.equals("avc3")) target = "avc3";
+            else if (codec.equals("avc1") || codec.equals("h264") || codec.equals("avc")) target = "avc1";
+            else if (codec.equals("hev1")) target = "hev1";
+        }
+        rewriteBoxTypes(d, moov.start, moov.end, "encv", target);
     }
 
     /**

@@ -1,6 +1,7 @@
 package cn.hongguo.tv.account;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 import org.junit.Test;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -13,6 +14,10 @@ public class QrMobileVerifierTest {
     private static JSONObject valid(String path) {
         if(path.equals("/reading/user/info/v"))return json("{\"code\":0,\"data\":{\"user_id\":\"synthetic-mobile-user\",\"user_name\":\"测试用户\"}}");
         return json(path.contains("history")?"{\"code\":0,\"data\":{\"data_list\":[]}}":"{\"code\":0,\"data\":{\"video_shelf_info\":[]}}");
+    }
+    private interface Response { JSONObject get() throws Exception; }
+    private static JSONObject response(Response response) {
+        try { return response.get(); } catch (Exception error) { throw new AssertionError(error); }
     }
     @Test public void verifiesProfileHistoryAndShelfInMobileScope()throws Exception {
         List<String> paths=new ArrayList<>();Account input=candidate();
@@ -32,6 +37,23 @@ public class QrMobileVerifierTest {
     }
     @Test public void malformedAccountListsAreRejected()throws Exception {
         try{QrMobileVerifier.verify(candidate(),(path,q,session)->path.contains("history")?json("{\"code\":0,\"data\":{\"data_list\":\"invalid\"}}"):valid(path));fail();}
+        catch(QrLoginManager.QrException error){assertEquals("QR_MOBILE_SESSION_UNAVAILABLE",error.code);}
+    }
+    @Test public void supportedHistoryListAliasesAreAccepted()throws Exception {
+        for(String key:new String[]{"read_history_list","history_list","list"}) {
+            Account result=QrMobileVerifier.verify(candidate(),(path,q,session)->{
+                if(path.contains("history"))return response(()->new JSONObject().put("code",0).put("data",new JSONObject().put(key,new JSONArray())));
+                return valid(path);
+            });
+            assertEquals("synthetic-mobile-user",result.uid);
+        }
+    }
+    @Test public void missingHistoryAliasesAreRejected()throws Exception {
+        try{QrMobileVerifier.verify(candidate(),(path,q,session)->path.contains("history")?response(()->new JSONObject().put("code",0).put("data",new JSONObject())):valid(path));fail();}
+        catch(QrLoginManager.QrException error){assertEquals("QR_MOBILE_SESSION_UNAVAILABLE",error.code);}
+    }
+    @Test public void invalidRequiredShelfListIsRejected()throws Exception {
+        try{QrMobileVerifier.verify(candidate(),(path,q,session)->path.contains("bookshelf")?response(()->new JSONObject().put("code",0).put("data",new JSONObject().put("video_shelf_info",JSONObject.NULL))):valid(path));fail();}
         catch(QrLoginManager.QrException error){assertEquals("QR_MOBILE_SESSION_UNAVAILABLE",error.code);}
     }
     @Test public void networkErrorsAreFixedAndRetryable()throws Exception {

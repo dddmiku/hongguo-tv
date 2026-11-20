@@ -48,6 +48,7 @@ public final class Updater {
             "https://github.com/" + REPO + "/releases/latest";
 
     private static final int TIMEOUT = 6000;
+    static final long MAX_APK_BYTES = 256L * 1024 * 1024;
 
     private Updater() {
     }
@@ -81,49 +82,52 @@ public final class Updater {
 
     /** 在后台线程调用。 */
     public static Result check(Context ctx) {
-        Result r = new Result();
-        r.current = localVersion(ctx);
-        JSONObject j = fetchLatest();
-        if (j == null) {
-            r.error = "无法连接更新服务";
-            return r;
+        String current = localVersion(ctx);
+        for (String mirror : LATEST_URLS) {
+            try {
+                String body = httpGet(mirror);
+                if (body == null || body.isEmpty()) continue;
+                Result result = parseFeed(current, new JSONObject(body));
+                if (result.ok) return result;
+            } catch (Exception e) {
+                Log.d(TAG, "更新镜像无法读取");
+            }
         }
+        Result result = new Result();
+        result.current = current;
+        result.error = "无法读取有效的 TV 更新信息";
+        return result;
+    }
 
-        // 关键：TV 端必须读自己的平台 key，不能拿桌面端的顶层 version 去比。
-        // 桌面端已经 1.9.x，TV 端是 1.0.x，两条版本线完全不同；
-        // 混用会让 TV 端永远提示「有新版本」，点进去下载到的还是 exe。
+    static Result parseFeed(String current, JSONObject j) {
+        Result r = new Result();
+        r.current = current;
+        r.error = "更新信息格式异常";
         JSONObject platforms = j.optJSONObject("platforms");
         JSONObject tv = platforms == null ? null : platforms.optJSONObject(TV_KEY);
-        if (tv == null) {
-            r.ok = true;
-            r.latest = r.current;
-            r.updateAvailable = false;
-            r.notes = "";
-            r.error = "";
-            // 没有 TV 资产 = 还没发过 TV 版，按「已是最新」处理，不误报
-            return r;
-        }
-
-        String latest = tv.optString("version", "").replaceFirst("^v", "");
-        if (latest.isEmpty()) {
-            latest = j.optString("version", "").replaceFirst("^v", "");
-        }
-        if (latest.isEmpty()) {
-            r.error = "更新信息格式异常";
-            return r;
-        }
+        if (tv == null) return r;
+        String latest = tv.optString("version", "");
+        String apkUrl = tv.optString("url", "");
+        String sha256 = tv.optString("sha256", "");
+        long size = tv.optLong("size", 0);
+        if (!validVersion(latest) || !sha256.matches("[0-9a-fA-F]{64}")
+                || tv.optInt("versionCode", 0) <= 0 || size <= 0 || size > MAX_APK_BYTES) return r;
+        String expectedUrl = "https://github.com/" + REPO + "/releases/download/v" + latest
+                + "/hongguo-tv-" + latest + ".APK";
+        if (!expectedUrl.equals(apkUrl)) return r;
         r.ok = true;
+        r.error = "";
         r.latest = latest;
         r.notes = tv.optString("notes", j.optString("notes", ""));
         r.updateAvailable = compare(latest, r.current) > 0;
-        String u = tv.optString("url", "");
-        if (!u.isEmpty()) {
-            r.pageUrl = u;
-            r.apkUrl = u;
-        }
-        r.sha256 = tv.optString("sha256", "");
-        r.size = tv.optLong("size", 0);
+        r.apkUrl = apkUrl;
+        r.sha256 = sha256;
+        r.size = size;
         return r;
+    }
+
+    static boolean validVersion(String version) {
+        return version != null && version.matches("[0-9]{1,9}[.][0-9]{1,9}[.][0-9]{1,9}");
     }
 
     /** TV 端在 latest.json 里的平台 key。 */
@@ -176,23 +180,6 @@ public final class Updater {
         } catch (Exception e) {
             return 0;
         }
-    }
-
-    /** 依次试各镜像，第一个成功的就用。 */
-    private static JSONObject fetchLatest() {
-        for (String u : LATEST_URLS) {
-            try {
-                String body = httpGet(u);
-                if (body != null && !body.isEmpty()) {
-                    JSONObject j = new JSONObject(body);
-                    Log.i(TAG, "更新信息来自 " + u);
-                    return j;
-                }
-            } catch (Throwable e) {
-                Log.d(TAG, "镜像失败 " + u + " : " + e.getMessage());
-            }
-        }
-        return null;
     }
 
     private static String httpGet(String url) throws Exception {

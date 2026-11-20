@@ -1,6 +1,5 @@
 """Publish an immutable TV release and update feed in the dedicated TV repository."""
 import argparse
-import copy
 import hashlib
 import json
 import os
@@ -35,7 +34,34 @@ def call(method,path,secret,**kwargs):
     return data
 
 def require_draft(release):
-    if not release.get("draft"):raise RuntimeError("该版本已公开，拒绝替换已发布资产；应递增版本号")
+    if release.get("draft") is not True:
+        raise RuntimeError("该版本已公开，拒绝替换已发布资产；应递增版本号")
+
+def find_release(tag, secret):
+    status, release = request("GET", API + "/releases/tags/" + tag, secret)
+    if status == 200:
+        return release
+    if status != 404:
+        raise RuntimeError("查询发布版本失败 HTTP " + str(status))
+    # The tag endpoint may omit drafts. Reuse the authenticated listing after interruption.
+    for page in range(1, 11):
+        items = call("GET", f"/releases?per_page=100&page={page}", secret)
+        if not isinstance(items, list):
+            raise RuntimeError("无法核对发布草稿")
+        matches = [item for item in items if item.get("tag_name") == tag]
+        if len(matches) > 1:
+            raise RuntimeError("该版本存在多个发布，已停止")
+        if matches or len(items) < 100:
+            return matches[0] if matches else None
+    raise RuntimeError("发布列表过长，无法确定版本是否已存在")
+
+def verified_assets(release, paths):
+    for path in paths:
+        assets = [asset for asset in release.get("assets", []) if asset.get("name") == path.name]
+        digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        if (len(assets) != 1 or assets[0].get("state") != "uploaded"
+                or assets[0].get("size") != path.stat().st_size or assets[0].get("digest") != digest):
+            raise RuntimeError("草稿资产未通过完整校验：" + path.name)
 
 def verify_signature(apk):
     sdk=os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME")
@@ -55,7 +81,7 @@ def upload(release,path,secret):
     current=call("GET","/releases/"+str(release["id"])+"/assets",secret)
     old=next((asset for asset in current if asset["name"]==path.name),None)
     if old:
-        if old.get("digest")==digest and old["size"]==path.stat().st_size:return
+        if old.get("state") == "uploaded" and old.get("digest")==digest and old["size"]==path.stat().st_size:return
         require_draft(call("GET","/releases/"+str(release["id"]),secret))
         call("DELETE","/releases/assets/"+str(old["id"]),secret)
     url=release["upload_url"].split("{")[0]+"?name="+quote(path.name)
@@ -64,6 +90,11 @@ def upload(release,path,secret):
     print("已上传：",path.name,asset["size"],"bytes",flush=True)
 
 def publish(source_commit):
+    if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT).strip():
+        raise RuntimeError("源码仍有未提交改动，停止发布")
+    current = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if source_commit != current:
+        raise RuntimeError("发布提交与当前源码不一致，停止发布")
     tv_version,code=version();tag="v"+tv_version;secret=token()
     apk=ROOT/"app/build/outputs/apk/release"/("hongguo-tv-"+tv_version+".apk")
     if not apk.is_file():raise RuntimeError("正式签名安装包尚未生成")
@@ -75,14 +106,18 @@ def publish(source_commit):
     sums=staging/"SHA256SUMS.txt";sums.write_text(hashlib.sha256(public_apk.read_bytes()).hexdigest()+"  "+public_apk.name+"\n",encoding="utf-8")
     remote=call("GET","/commits/"+source_commit,secret)
     if remote.get("sha")!=source_commit:raise RuntimeError("正式源码提交尚未推送")
-    status,release=request("GET",API+"/releases/tags/"+tag,secret)
-    if status==404:release=call("POST","/releases",secret,data={"tag_name":tag,"target_commitish":source_commit,"name":"红果客厅 TV "+tv_version,"body":notes,"draft":True,"prerelease":False})
-    elif status!=200:raise RuntimeError("查询发布版本失败")
+    release = find_release(tag, secret)
+    if release is None:
+        release=call("POST","/releases",secret,data={"tag_name":tag,"target_commitish":source_commit,"name":"红果客厅 TV "+tv_version,"body":notes,"draft":True,"prerelease":False})
     require_draft(release)
     ref_status,ref=request("GET",API+"/git/ref/tags/"+tag,secret)
     if ref_status==200 and ref.get("object",{}).get("sha")!=source_commit:raise RuntimeError("该草稿已有不同源码标签，请检查后再发布")
+    if ref_status not in (200, 404):
+        raise RuntimeError("无法核对草稿源码标签 HTTP " + str(ref_status))
     for path in (public_apk,latest,sums):upload(release,path,secret)
-    require_draft(call("GET","/releases/"+str(release["id"]),secret))
+    uploaded = call("GET", "/releases/"+str(release["id"]), secret)
+    require_draft(uploaded)
+    verified_assets(uploaded, (public_apk, latest, sums))
     done=call("PATCH","/releases/"+str(release["id"]),secret,data={"draft":False,"make_latest":"true","target_commitish":source_commit,"body":notes,"name":"红果客厅 TV "+tv_version})
     if done.get("draft"):raise RuntimeError("发布未完成")
     print("已发布：",done["html_url"],flush=True)

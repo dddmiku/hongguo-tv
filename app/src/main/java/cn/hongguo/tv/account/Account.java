@@ -113,6 +113,16 @@ public final class Account {
         return new Account(cookie, token, uid, name, "");
     }
 
+    static Account candidate(String cookie, String token, String uid, String name, String mobile) {
+        return new Account(cookie, token, uid, name, mobile);
+    }
+
+    static synchronized boolean commitSms(Context ctx, Account candidate, String expectedIdentity) {
+        if (!load(ctx).sessionIdentity().equals(expectedIdentity)) return false;
+        save(ctx, candidate.cookie, candidate.token, candidate.uid, candidate.userName, candidate.mobile);
+        return true;
+    }
+
     static synchronized void commitQr(Context ctx, Account candidate, String expectedIdentity)
             throws java.io.IOException {
         if (!load(ctx).sessionIdentity().equals(expectedIdentity)) {

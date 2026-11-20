@@ -34,46 +34,41 @@ public final class ApkProvider extends ContentProvider {
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode)
             throws FileNotFoundException {
-        if (getContext() == null) {
-            throw new FileNotFoundException("no context");
-        }
-        // 只允许读：安装器只需要读权限
-        if (mode != null && mode.contains("w")) {
+        if (!"r".equals(mode)) {
             throw new FileNotFoundException("read-only provider");
         }
+        return ParcelFileDescriptor.open(updateApk(uri), ParcelFileDescriptor.MODE_READ_ONLY);
+    }
+
+    private File updateApk(Uri uri) throws FileNotFoundException {
         String name = uri.getLastPathSegment();
-        if (name == null || name.isEmpty()) {
-            throw new FileNotFoundException("empty name");
+        if (getContext() == null || uri.getPathSegments().size() != 1 || name == null
+                || !name.matches("hongguo-tv-[0-9]{1,9}[.][0-9]{1,9}[.][0-9]{1,9}[.]apk")) {
+            throw new FileNotFoundException("invalid update package name");
         }
-        // 只取 basename，挡掉 ../ 之类的路径穿越
-        name = new File(name).getName();
         File dir = new File(getContext().getCacheDir(), "updates");
         File f = new File(dir, name);
-        // 二次确认：解析后的规范路径必须仍在 updates 目录内
+        final File canonical;
         try {
-            if (!f.getCanonicalPath().startsWith(dir.getCanonicalPath())) {
+            canonical = f.getCanonicalFile();
+            if (!dir.getCanonicalFile().equals(canonical.getParentFile())) {
                 throw new FileNotFoundException("outside provider root");
             }
         } catch (java.io.IOException e) {
             throw new FileNotFoundException("path check failed");
         }
-        if (!f.isFile()) {
-            throw new FileNotFoundException("not found: " + name);
-        }
-        return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
+        if (!canonical.isFile()) throw new FileNotFoundException("update package unavailable");
+        return canonical;
     }
 
     /** 让安装器能拿到文件名和大小（部分 ROM 会读这个）。 */
     @Override
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
-        String name = uri.getLastPathSegment();
-        if (name == null || getContext() == null) {
-            return null;
-        }
-        name = new File(name).getName();
-        File f = new File(new File(getContext().getCacheDir(), "updates"), name);
-        if (!f.isFile()) {
+        final File f;
+        try {
+            f = updateApk(uri);
+        } catch (FileNotFoundException e) {
             return null;
         }
         String[] cols = projection != null ? projection

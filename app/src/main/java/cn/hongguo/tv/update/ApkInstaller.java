@@ -2,6 +2,9 @@ package cn.hongguo.tv.update;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.util.Log;
@@ -57,45 +60,44 @@ public final class ApkInstaller {
      * 下载 APK。在后台线程调用。
      *
      * @param rawUrl GitHub 原始下载地址（latest.json 里的 url）
-     * @param sha256 期望的 sha256，空串表示跳过校验
+     * @param sha256 期望的 SHA-256
+     * @param size 期望的文件大小
      * @param dst    保存路径
      */
-    public static void download(String rawUrl, String sha256, File dst, Progress cb) {
+    public static synchronized void download(String rawUrl, String sha256, long size, File dst, Progress cb) {
+        if (!sha256.matches("[0-9a-fA-F]{64}") || size <= 0 || size > Updater.MAX_APK_BYTES) {
+            cb.onError("更新信息格式异常");
+            return;
+        }
+        File part = new File(dst.getPath() + ".part");
         // 逐个镜像尝试：某个镜像挂了就换下一个，全部失败才报错
         for (String proxy : PROXIES) {
             String url = proxy.isEmpty() ? rawUrl : proxy + rawUrl;
             try {
-                Log.i(TAG, "尝试下载 " + url);
-                long n = fetch(url, dst, cb);
-                if (n <= 0) {
+                long n = fetch(url, part, size, cb);
+                if (n != size || !sha256.equalsIgnoreCase(sha256(part))) {
+                    Log.w(TAG, "下载的安装包校验失败");
                     continue;
                 }
-                if (!sha256.isEmpty()) {
-                    String got = sha256(dst);
-                    if (!sha256.equalsIgnoreCase(got)) {
-                        Log.w(TAG, "sha256 不匹配，丢弃：" + got);
-                        dst.delete();
-                        continue;   // 换镜像重试，可能是传输截断
-                    }
-                }
+                if (!part.renameTo(dst)) throw new java.io.IOException("无法保存下载文件");
                 cb.onDone(dst);
                 return;
-            } catch (Throwable e) {
-                Log.w(TAG, "镜像失败 " + proxy + " : " + e.getMessage());
-                dst.delete();
+            } catch (Exception e) {
+                Log.w(TAG, "更新镜像下载失败");
+            } finally {
+                part.delete();
             }
         }
         cb.onError("下载失败（所有镜像均不可用）");
     }
 
-    private static long fetch(String url, File dst, Progress cb) throws Exception {
+    private static long fetch(String url, File dst, long expectedSize, Progress cb) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setConnectTimeout(15000);
         c.setReadTimeout(60000);
         // 跟随跳转：GitHub 的 release 资源会 302 到对象存储
         c.setInstanceFollowRedirects(true);
         c.setRequestProperty("User-Agent", "HongguoTV");
-        long total = c.getContentLength();
         long done = 0;
         int lastPct = -1;
         try (InputStream in = c.getInputStream();
@@ -103,14 +105,13 @@ public final class ApkInstaller {
             byte[] buf = new byte[65536];
             int n;
             while ((n = in.read(buf)) != -1) {
+                if (done + n > expectedSize) throw new java.io.IOException("安装包超过预期大小");
                 out.write(buf, 0, n);
                 done += n;
-                if (total > 0) {
-                    int pct = (int) (done * 100 / total);
-                    if (pct != lastPct) {
-                        lastPct = pct;
-                        cb.onProgress(pct, done, total);
-                    }
+                int pct = (int) (done * 100 / expectedSize);
+                if (pct != lastPct) {
+                    lastPct = pct;
+                    cb.onProgress(pct, done, expectedSize);
                 }
             }
         } finally {
@@ -149,20 +150,20 @@ public final class ApkInstaller {
      *   3. 检查到「已是最新版本」时。
      * 不在这里「下载前清空」—— 那是「授权完回来要重新下载」的根因。
      *
-     * @param keep 保留哪个文件（正在等待安装的那个），可传 null
      */
-    public static void cleanOld(Context ctx, File keep) {
+    public static void cleanOld(Context ctx) {
         try {
             File dir = new File(ctx.getCacheDir(), "updates");
             File[] files = dir.listFiles();
             if (files == null) {
                 return;
             }
+            String current = Updater.currentVersion(ctx);
             for (File f : files) {
-                if (keep != null && f.getAbsolutePath().equals(keep.getAbsolutePath())) {
-                    continue;
-                }
-                if (f.delete()) {
+                String name = f.getName();
+                if (!name.startsWith("hongguo-tv-") || !name.endsWith(".apk")) continue;
+                String version = name.substring("hongguo-tv-".length(), name.length() - ".apk".length());
+                if (Updater.validVersion(version) && Updater.compare(version, current) <= 0 && f.delete()) {
                     Log.i(TAG, "清理安装包 " + f.getName());
                 }
             }
@@ -180,6 +181,7 @@ public final class ApkInstaller {
      * 就能用，不该让用户重新下载。
      */
     public static File findPending(Context ctx, String latestVersion) {
+        if (!Updater.validVersion(latestVersion)) return null;
         try {
             File dir = new File(ctx.getCacheDir(), "updates");
             File f = new File(dir, "hongguo-tv-" + latestVersion + ".apk");
@@ -196,17 +198,57 @@ public final class ApkInstaller {
      * Android 8+ 需要 REQUEST_INSTALL_PACKAGES 权限，且用户要手动允许
      * 「安装未知应用」。没权限时跳到设置页引导，而不是静默失败。
      */
-    public static void install(Context ctx, File apk) {
+    public enum InstallResult { REQUESTED_PERMISSION, OPENED_INSTALLER, FAILED }
+
+    /** Resume only after a permission prompt, never after the installer itself is dismissed. */
+    public static final class Handoff {
+        interface Installer {
+            InstallResult open(Context context, File apk, String version);
+        }
+        private final Installer installer;
+        private final java.util.function.Predicate<Context> hasPermission;
+        private File awaitingPermission;
+        private String version;
+
+        public Handoff() {
+            this(ApkInstaller::install, ApkInstaller::canInstall);
+        }
+
+        Handoff(Installer installer, java.util.function.Predicate<Context> hasPermission) {
+            this.installer = installer;
+            this.hasPermission = hasPermission;
+        }
+
+        public InstallResult start(Context context, File apk, String updateVersion) {
+            InstallResult result = installer.open(context, apk, updateVersion);
+            awaitingPermission = result == InstallResult.REQUESTED_PERMISSION ? apk : null;
+            version = updateVersion;
+            return result;
+        }
+
+        public InstallResult resume(Context context) {
+            File apk = awaitingPermission;
+            awaitingPermission = null;
+            if (apk == null || !hasPermission.test(context)) return null;
+            return installer.open(context, apk, version);
+        }
+    }
+
+    public static boolean canInstall(Context ctx) {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || ctx.getPackageManager().canRequestPackageInstalls();
+    }
+
+    private static InstallResult install(Context ctx, File apk, String version) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                    && !ctx.getPackageManager().canRequestPackageInstalls()) {
+            if (!matchesInstalledApp(ctx, apk, version)) return InstallResult.FAILED;
+            if (!canInstall(ctx)) {
                 // 没有安装权限：跳到本应用的「安装未知应用」设置页
                 Intent i = new Intent(
                         android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                         Uri.parse("package:" + ctx.getPackageName()));
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 ctx.startActivity(i);
-                return;
+                return InstallResult.REQUESTED_PERMISSION;
             }
             Intent i = new Intent(Intent.ACTION_VIEW);
             Uri uri = uriFor(ctx, apk);
@@ -216,9 +258,25 @@ public final class ApkInstaller {
             // 不 grant 的话安装器读不到文件（表现为「解析包错误」）。
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             ctx.startActivity(i);
-        } catch (Throwable e) {
-            Log.e(TAG, "调起安装器失败", e);
+            return InstallResult.OPENED_INSTALLER;
+        } catch (Exception e) {
+            Log.e(TAG, "调起安装器失败");
+            return InstallResult.FAILED;
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static boolean matchesInstalledApp(Context ctx, File apk, String version) throws Exception {
+        PackageManager packages = ctx.getPackageManager();
+        // Check the current app's signer on Android 7 as well. These releases use the same signer.
+        PackageInfo current = packages.getPackageInfo(ctx.getPackageName(), PackageManager.GET_SIGNATURES);
+        PackageInfo next = packages.getPackageArchiveInfo(apk.getAbsolutePath(), PackageManager.GET_SIGNATURES);
+        if (next == null || !current.packageName.equals(next.packageName) || !version.equals(next.versionName)
+                || next.versionCode <= current.versionCode) return false;
+        Signature[] installed = current.signatures, downloaded = next.signatures;
+        return installed != null && downloaded != null && installed.length > 0
+                && new java.util.HashSet<>(java.util.Arrays.asList(installed))
+                .equals(new java.util.HashSet<>(java.util.Arrays.asList(downloaded)));
     }
 
     /** 生成可被系统安装器读取的 URI。 */

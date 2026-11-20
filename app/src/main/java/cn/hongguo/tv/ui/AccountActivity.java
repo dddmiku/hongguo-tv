@@ -101,8 +101,10 @@ public class AccountActivity extends TvActivity {
 
     private cn.hongguo.tv.cache.LibraryRepository library;
     private final Runnable libraryUpdated=()->{if(!isDestroyed()&&cn.hongguo.tv.account.Account.load(this).loggedIn())loadLists();};
-    private String mobileTicket = "";
-    private int countdown = 0;
+    private final SmsAttempt smsAttempt = new SmsAttempt();
+    private boolean smsBusy;
+    private long smsCooldownUntil;
+    private final Runnable smsCountdown = this::refreshSmsButtons;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -311,6 +313,7 @@ public class AccountActivity extends TvActivity {
 
     private void selectLoginMode(boolean scan) {
         if (Account.load(this).loggedIn()) return;
+        if (qrMode != scan) invalidateSmsAttempt();
         qrMode = scan;
         clearKeypad();
         if (!scan) stopQrLogin();
@@ -327,6 +330,7 @@ public class AccountActivity extends TvActivity {
             qrRefreshBtn.requestFocus();
             if (foreground && qrLogin == null) startQrLogin();
         } else smsModeBtn.requestFocus();
+        refreshSmsButtons();
     }
 
     private void wireLoginFocus() {
@@ -518,6 +522,15 @@ public class AccountActivity extends TvActivity {
         mobileInput.setSingleLine(true);
         mobileInput.setInputType(InputType.TYPE_CLASS_NUMBER);
         mobileInput.setImeOptions(EditorInfo.IME_ACTION_NEXT);
+        mobileInput.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
+            public void afterTextChanged(android.text.Editable value) { }
+            public void onTextChanged(CharSequence value, int start, int before, int count) {
+                smsAttempt.changeNumber(value.toString().trim());
+                smsBusy = false;
+                refreshSmsButtons();
+            }
+        });
         // 不弹系统输入法：改用下面的内置数字面板。
         //
         // 为什么必须自己画：电视/盒子的系统输入法要么根本没有，要么是
@@ -1033,41 +1046,30 @@ public class AccountActivity extends TvActivity {
     // --------------------------------------------------------------- 登录
 
     private void doSendCode() {
-        if (qrMode || !foreground || !loginForm.isShown()) return;
+        if (qrMode || !foreground || !loginForm.isShown() || smsBusy || !sendCodeBtn.isEnabled()) return;
         String mobile = mobileInput.getText().toString().trim();
         if (!mobile.matches("1\\d{10}")) {
             setStatus("请输入正确的手机号");
             return;
         }
-        sendCodeBtn.setEnabled(false);
+        final long request = smsAttempt.begin();
+        final String identity = Account.load(this).sessionIdentity();
+        smsBusy = true;
+        refreshSmsButtons();
         setStatus("正在发送验证码…");
         new Thread(() -> {
             try {
                 JSONObject j = account.sendCode(mobile);
                 JSONObject data = j.optJSONObject("data");
-                mobileTicket = data == null ? "" : data.optString("mobile_ticket", "");
+                String ticket = data == null ? "" : data.optString("mobile_ticket", "");
                 // 护照信封是 {"message":"success","data":{...}}，
                 // 失败时 data 里才有 error_code/description。
                 // 直接读顶层 description 会拿到空串、再退回 message
                 // 拿到字面量 "error"（实测就是这个显示）。
-                int errCode = data == null ? 0 : data.optInt("error_code", 0);
+                int errCode = data == null ? j.optInt("code", -1) : data.optInt("error_code", j.optInt("code", 0));
                 String shown;
                 if (errCode != 0) {
-                    shown = data.optString("description", "");
-                    // error_code=7 是「客户端判定异常」，但服务端文案会伪装成
-                    // 「访问太频繁」。实测（MuMu / 2026-11-04）：同一台设备、
-                    // 同一组字段，用随包 so 签名就恒等于 7，用桌面端签名服务
-                    // 就正常下发。所以它不是频率问题，换号、等多久都不会好。
-                    // 直接把结论告诉用户，省得他一直重试。
-                    if (errCode == 7) {
-                        shown = "本机组件未通过服务端校验，暂时无法发送验证码"
-                                + "（换号、重试都无效）。请先升级到最新版本。";
-                    } else if (shown.isEmpty()) {
-                        shown = "发送失败（错误码 " + errCode + "）";
-                    } else if (errCode == 1206) {
-                        shown = "这个号码发送太频繁，请稍后再试"
-                                + "（或换一个号码）";
-                    }
+                    shown = smsSendErrorMessage(data, errCode);
                 } else {
                     shown = "验证码已发送";
                     if (data != null && data.optInt("retry_time", 0) > 0) {
@@ -1077,44 +1079,62 @@ public class AccountActivity extends TvActivity {
                 final String msg = shown;
                 final boolean sent = errCode == 0;
                 runOnUiThread(() -> {
+                    if (!smsAttemptCurrent(request, mobile, identity)) return;
+                    smsBusy = false;
                     setStatus(msg);
                     if (sent) {
-                        startCountdown();
+                        smsAttempt.acceptTicket(ticket);
+                        smsCooldownUntil = android.os.SystemClock.elapsedRealtime() + 60_000L;
                         codeInput.requestFocus();
-                    } else {
-                        sendCodeBtn.setEnabled(true);
                     }
+                    refreshSmsButtons();
                 });
-            } catch (Throwable e) {
-                Log.w(TAG, "发码失败", e);
+            } catch (Exception e) {
                 runOnUiThread(() -> {
-                    setStatus("发送失败：" + e.getMessage());
-                    sendCodeBtn.setEnabled(true);
+                    if (!smsAttemptCurrent(request, mobile, identity)) return;
+                    smsBusy = false;
+                    setStatus("暂时无法发送验证码，请稍后重试。");
+                    refreshSmsButtons();
                 });
             }
         }, "send-code").start();
     }
 
-    private void startCountdown() {
-        countdown = 60;
-        sendCodeBtn.setText(countdown + "s");
-        sendCodeBtn.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (countdown <= 0) {
-                    sendCodeBtn.setEnabled(true);
-                    sendCodeBtn.setText("获取验证码");
-                    return;
-                }
-                countdown--;
-                sendCodeBtn.setText(countdown + "s");
-                sendCodeBtn.postDelayed(this, 1000);
-            }
-        }, 1000);
+    static String smsSendErrorMessage(JSONObject data, int errCode) {
+        String shown = data == null ? "" : data.optString("description", "");
+        // error_code=7 是客户端校验失败，不是频率限制。
+        if (errCode == 7) {
+            return "本机组件未通过服务端校验，暂时无法发送验证码（换号、重试都无效）。请先升级到最新版本。";
+        }
+        if (shown.isEmpty()) return "发送失败（错误码 " + errCode + "）";
+        if (errCode == 1206) return "这个号码发送太频繁，请稍后再试（或换一个号码）";
+        return shown;
+    }
+
+    private boolean smsAttemptCurrent(long request, String mobile, String identity) {
+        return foreground && !qrMode && !isFinishing() && !isDestroyed()
+                && smsAttempt.current(request, mobile)
+                && identity.equals(Account.load(this).sessionIdentity());
+    }
+
+    private void invalidateSmsAttempt() {
+        smsAttempt.invalidate();
+        smsBusy = false;
+        if (sendCodeBtn != null) sendCodeBtn.removeCallbacks(smsCountdown);
+    }
+
+    private void refreshSmsButtons() {
+        if (sendCodeBtn == null || loginBtn == null) return;
+        sendCodeBtn.removeCallbacks(smsCountdown);
+        long seconds = Math.max(0L, (smsCooldownUntil - android.os.SystemClock.elapsedRealtime() + 999L) / 1000L);
+        sendCodeBtn.setText(seconds == 0 ? "获取验证码" : seconds + "s");
+        sendCodeBtn.setEnabled(!smsBusy && seconds == 0);
+        loginBtn.setEnabled(!smsBusy);
+        if (foreground && !qrMode && seconds > 0) sendCodeBtn.postDelayed(smsCountdown, 1000L);
     }
 
     private void doLogin() {
-        if (qrMode || !foreground || !loginForm.isShown()) return;
+        if (qrMode || !foreground || !loginForm.isShown() || smsBusy) return;
         String mobile = mobileInput.getText().toString().trim();
         String code = codeInput.getText().toString().trim();
         if (!mobile.matches("1\\d{10}")) {
@@ -1125,11 +1145,16 @@ public class AccountActivity extends TvActivity {
             setStatus("请输入验证码");
             return;
         }
-        loginBtn.setEnabled(false);
+        final long request = smsAttempt.begin();
+        final String identity = Account.load(this).sessionIdentity();
+        final String ticket = smsAttempt.ticket();
+        smsBusy = true;
+        refreshSmsButtons();
         setStatus("登录中…");
         new Thread(() -> {
             try {
-                JSONObject j = account.smsLogin(mobile, code, mobileTicket);
+                AccountApi.SmsReply reply = account.smsLogin(mobile, code, ticket);
+                JSONObject j = reply.body;
                 boolean ok = j.optInt("code", -1) == 0
                         || "success".equalsIgnoreCase(j.optString("message", ""));
                 JSONObject data = j.optJSONObject("data");
@@ -1138,6 +1163,13 @@ public class AccountActivity extends TvActivity {
                 }
                 if (ok) {
                     runOnUiThread(() -> {
+                        if (!smsAttemptCurrent(request, mobile, identity)) return;
+                        smsBusy = false;
+                        refreshSmsButtons();
+                        if (!reply.commit(identity)) {
+                            setStatus("验证码登录未完成，请重新尝试。");
+                            return;
+                        }
                         setStatus("登录成功");
                         refresh();
                         library.sync(true);
@@ -1154,15 +1186,18 @@ public class AccountActivity extends TvActivity {
                     }
                     final String msg = why;
                     runOnUiThread(() -> {
+                        if (!smsAttemptCurrent(request, mobile, identity)) return;
+                        smsBusy = false;
                         setStatus(msg);
-                        loginBtn.setEnabled(true);
+                        refreshSmsButtons();
                     });
                 }
-            } catch (Throwable e) {
-                Log.w(TAG, "登录失败", e);
+            } catch (Exception e) {
                 runOnUiThread(() -> {
-                    setStatus("登录失败：" + e.getMessage());
-                    loginBtn.setEnabled(true);
+                    if (!smsAttemptCurrent(request, mobile, identity)) return;
+                    smsBusy = false;
+                    setStatus("暂时无法登录，请重新尝试。");
+                    refreshSmsButtons();
                 });
             }
         }, "sms-login").start();
@@ -1170,6 +1205,7 @@ public class AccountActivity extends TvActivity {
 
     private void doLogout() {
         stopQrLogin();
+        invalidateSmsAttempt();
         Account.clear(this);
         if(library!=null)library.sync(false);
         setStatus("已退出登录");
@@ -1419,6 +1455,7 @@ public class AccountActivity extends TvActivity {
                         cn.hongguo.tv.update.Updater.check(this);
                 runOnUiThread(() -> {
                     updateBusy = false;
+                    if (!foreground || isFinishing() || isDestroyed()) return;
                     setStatus(r.message());
                     if (!r.ok) {
                         new android.app.AlertDialog.Builder(this)
@@ -1463,10 +1500,14 @@ public class AccountActivity extends TvActivity {
                 .show();
     }
 
-    /** 已下载的安装包（授权「未知来源」后回来直接装，不用重下）。 */
-    private java.io.File pendingApk;
-    /** 待装包对应的版本号，用来判断「是否已经装上」。 */
-    private String pendingApkVersion = "";
+    private final cn.hongguo.tv.update.ApkInstaller.Handoff updateHandoff = new cn.hongguo.tv.update.ApkInstaller.Handoff();
+
+    private void startInstall(java.io.File apk, String version) {
+        if (!foreground || isFinishing() || isDestroyed()) return;
+        if (updateHandoff.start(this, apk, version) == cn.hongguo.tv.update.ApkInstaller.InstallResult.FAILED) {
+            setStatus("安装包与当前应用不匹配，或系统安装器不可用。");
+        }
+    }
 
     private void downloadAndInstall(cn.hongguo.tv.update.Updater.Result r) {
         if (r.apkUrl.isEmpty()) {
@@ -1480,11 +1521,8 @@ public class AccountActivity extends TvActivity {
         }
         final java.io.File dst = new java.io.File(dir, "hongguo-tv-" + r.latest + ".apk");
         // 已经下好且校验通过就直接装，不再重下（授权完回来走这条路）
-        if (dst.isFile() && dst.length() > 0
-                && (r.sha256.isEmpty()
-                || sha256Matches(dst, r.sha256))) {
-            pendingApk = dst;
-            cn.hongguo.tv.update.ApkInstaller.install(this, dst);
+        if (dst.isFile() && dst.length() == r.size && sha256Matches(dst, r.sha256)) {
+            startInstall(dst, r.latest);
             return;
         }
 
@@ -1497,11 +1535,12 @@ public class AccountActivity extends TvActivity {
         pd.show();
 
         new Thread(() -> cn.hongguo.tv.update.ApkInstaller.download(
-                r.apkUrl, r.sha256, dst,
+                r.apkUrl, r.sha256, r.size, dst,
                 new cn.hongguo.tv.update.ApkInstaller.Progress() {
                     @Override
                     public void onProgress(int pct, long done, long total) {
                         runOnUiThread(() -> {
+                            if (isFinishing() || isDestroyed()) return;
                             pd.setProgress(pct);
                             pd.setMessage(pct + "%  " + (done / 1024 / 1024)
                                     + " / " + (total / 1024 / 1024) + " MB");
@@ -1511,6 +1550,7 @@ public class AccountActivity extends TvActivity {
                     @Override
                     public void onError(String message) {
                         runOnUiThread(() -> {
+                            if (isFinishing() || isDestroyed()) return;
                             pd.dismiss();
                             setStatus(message);
                         });
@@ -1519,12 +1559,10 @@ public class AccountActivity extends TvActivity {
                     @Override
                     public void onDone(java.io.File apk) {
                         runOnUiThread(() -> {
+                            if (isFinishing() || isDestroyed()) return;
                             pd.dismiss();
                             setStatus("下载完成，正在安装…");
-                            pendingApk = apk;
-                            pendingApkVersion = r.latest;
-                            cn.hongguo.tv.update.ApkInstaller.install(
-                                    AccountActivity.this, apk);
+                            startInstall(apk, r.latest);
                         });
                     }
                 }), "update-download").start();
@@ -1544,48 +1582,15 @@ public class AccountActivity extends TvActivity {
         super.onResume();
         foreground = true;
         if(loginForm!=null)refresh();
+        refreshSmsButtons();
         if(qrMode && !Account.load(this).loggedIn() && qrLogin==null)startQrLogin();
         if(library!=null){library.observe(libraryUpdated);library.sync(false);}
-        // 从「允许安装未知应用」授权页回来：已经下好包就接着装
-        java.io.File apk = pendingApk;
-        // 本地版本已追平待装版本 = 刚才装成功了，把安装包清掉。
-        if (apk != null) {
-            String local = cn.hongguo.tv.update.Updater.currentVersion(this);
-            if (!pendingApkVersion.isEmpty()
-                    && cn.hongguo.tv.update.Updater.compare(local, pendingApkVersion) >= 0) {
-                cn.hongguo.tv.update.ApkInstaller.cleanOld(this, null);
-                pendingApk = null;
-                pendingApkVersion = "";
-                apk = null;
-            }
-        } else {
-            // 没有待装包时顺手清一次启动残留。
-            cn.hongguo.tv.update.ApkInstaller.cleanOld(this, null);
-        }
-        if (apk != null && apk.isFile() && apk.length() > 0) {
-            try {
-                boolean can = android.os.Build.VERSION.SDK_INT
-                        < android.os.Build.VERSION_CODES.O
-                        || getPackageManager().canRequestPackageInstalls();
-                if (can) {
-                    cn.hongguo.tv.update.ApkInstaller.install(this, apk);
-                }
-            } catch (Throwable e) {
-                Log.w(TAG, "续装失败", e);
-            }
+        if (updateHandoff.resume(this) == cn.hongguo.tv.update.ApkInstaller.InstallResult.FAILED) {
+            setStatus("无法安装更新，请重新检查更新。");
         }
     }
 
-    /**
-     * 焦点离开「键盘 + 两个输入框」时自动收起键盘。
-     *
-     * 为什么用 dispatchKeyEvent 而不是焦点监听：
-     *   方向键在键盘内部移动也会触发失焦/获焦，用焦点监听会把「从一个
-     *   数字键移到另一个数字键」误判成离开键盘，键盘一路抖。
-     *   这里改成「每次按键之后检查一次当前焦点落在哪」，只有焦点真的
-     *   跑到键盘和输入框之外才收，判断稳定。
-     */
-    @Override protected void onPause(){foreground=false;stopQrLogin();clearKeypad();if(library!=null)library.unobserve(libraryUpdated);super.onPause();}
+    @Override protected void onPause(){foreground=false;invalidateSmsAttempt();stopQrLogin();clearKeypad();if(library!=null)library.unobserve(libraryUpdated);super.onPause();}
     @Override protected void onStop(){stopQrLogin();super.onStop();}
     @Override protected void onDestroy(){stopQrLogin();if(library!=null)library.unobserve(libraryUpdated);super.onDestroy();}
 

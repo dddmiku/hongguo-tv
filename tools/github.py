@@ -5,6 +5,7 @@ import json
 import socket
 import urllib.request
 import urllib.error
+from urllib.parse import urlsplit
 
 def token():
     class Credential(ctypes.Structure):
@@ -40,14 +41,17 @@ def proxy():
 
 def request(method, url, secret=None, data=None, raw=None, content_type=None):
     headers = {"User-Agent": "hongguo-desktop-publisher", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    if secret:
-        headers["Authorization"] = "Bearer " + secret
     body = raw if raw is not None else json.dumps(data).encode() if data is not None else None
     if body is not None:
         headers["Content-Type"] = content_type or "application/json"
     route = proxy()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": route, "https": route} if route else {}))
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    if secret:
+        target = urlsplit(url)
+        if target.scheme != "https" or target.netloc not in ("api.github.com", "uploads.github.com"):
+            raise ValueError("发布凭据仅用于 GitHub API 和资产上传")
+        req.add_unredirected_header("Authorization", "Bearer " + secret)
     try:
         with opener.open(req, timeout=240 if raw is not None else 25) as response:
             content = response.read()

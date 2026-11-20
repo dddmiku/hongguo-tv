@@ -33,7 +33,7 @@ public final class DecryptProbe {
      * @param url    轨道直链
      * @param spadeA encrypt_info.spade_a
      * @param dir    工作目录（放下载的密文与解出的明文）
-     * @return 人类可读的结果串
+     * @return 人类可读的结果串；不包含密钥或上游异常文本
      */
     public static String run(String url, String spadeA, File dir) {
         StringBuilder log = new StringBuilder();
@@ -54,8 +54,6 @@ public final class DecryptProbe {
             if (key == null) {
                 return log.append(" ✗ spade 解析失败").toString();
             }
-            log.append(" key=").append(toHex(key));
-
             // 3) 解密
             long t1 = System.currentTimeMillis();
             Decryptor.Result r = Decryptor.decrypt(enc, out, key);
@@ -73,10 +71,13 @@ public final class DecryptProbe {
             Log.i(TAG, log.toString());
             return log.toString();
         } catch (Throwable e) {
-            Log.e(TAG, "验证失败", e);
-            return log.append(" ✗ ").append(e.getClass().getSimpleName())
-                    .append(": ").append(e.getMessage()).toString();
+            Log.e(TAG, failureSummary(e));
+            return log.append(" ✗ ").append(failureSummary(e)).toString();
         }
+    }
+
+    static String failureSummary(Throwable error) {
+        return "验证失败";
     }
 
     private static long download(String url, File dst) throws Exception {
@@ -243,11 +244,4 @@ public final class DecryptProbe {
         }
     }
 
-    private static String toHex(byte[] b) {
-        StringBuilder sb = new StringBuilder();
-        for (byte x : b) {
-            sb.append(String.format("%02x", x & 0xFF));
-        }
-        return sb.toString();
-    }
 }

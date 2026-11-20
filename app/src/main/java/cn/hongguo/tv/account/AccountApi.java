@@ -87,16 +87,15 @@ public final class AccountApi {
         form.put("type", xorHex(SMS_TYPE));
         form.put("unbind_exist", xorHex("1"));
         form.put("auto_read", "0");
-        return passportPost("/passport/mobile/send_code/v1/", form, "");
+        return passportPost("/passport/mobile/send_code/v1/", form, "").body;
     }
 
     /**
-     * 验证码登录。成功后把登录态写进 {@link Account}，之后的所有账号请求
-     * 都自动带上它。
+     * 请求验证码登录。页面核对当前输入和会话后才提交返回的登录态。
      *
      * @param mobileTicket sendCode 返回的 mobile_ticket，没有就传空
      */
-    public JSONObject smsLogin(String mobile, String code, String mobileTicket)
+    public SmsReply smsLogin(String mobile, String code, String mobileTicket)
             throws IOException {
         Map<String, String> form = passportForm();
         form.put("mobile", xorHex(normalizeMobile(mobile)));
@@ -104,11 +103,10 @@ public final class AccountApi {
         if (mobileTicket != null && !mobileTicket.isEmpty()) {
             form.put("mobile_ticket", mobileTicket);
         }
-        JSONObject j = passportPost("/passport/mobile/sms_login/", form, "");
-        if (!ok(j)) {
-            return j;
-        }
-        String cookie = lastCookie;
+        PassportReply response = passportPost("/passport/mobile/sms_login/", form, "");
+        JSONObject j = response.body;
+        if (!ok(j)) return new SmsReply(j, null);
+        String cookie = response.cookies;
         String token = extractToken(j);
         String uid = "";
         String name = "";
@@ -126,9 +124,22 @@ public final class AccountApi {
                 }
             }
         }
-        Account.save(context, cookie, token, uid, name, mobile);
-        Log.i(TAG, "登录会话已保存");
-        return j;
+        if (cookie.isEmpty() && token.isEmpty()) throw new IOException("登录服务没有返回可用会话");
+        return new SmsReply(j, Account.candidate(cookie, token, uid, name, mobile));
+    }
+
+    public final class SmsReply {
+        public final JSONObject body;
+        private final Account candidate;
+
+        private SmsReply(JSONObject body, Account candidate) {
+            this.body = body;
+            this.candidate = candidate;
+        }
+
+        public boolean commit(String originIdentity) {
+            return candidate != null && Account.commitSms(context, candidate, originIdentity);
+        }
     }
 
     /**
@@ -314,8 +325,11 @@ public final class AccountApi {
 
     // ------------------------------------------------------- 请求基础设施
 
-    /** 上一次请求收到的 Set-Cookie（登录成功后取它当身份）。 */
-    private String lastCookie = "";
+    private static final class PassportReply {
+        final JSONObject body;
+        final String cookies;
+        PassportReply(JSONObject body, String cookies) { this.body = body; this.cookies = cookies; }
+    }
 
     private Map<String, String> passportForm() {
         Map<String, String> f = new LinkedHashMap<>();
@@ -398,7 +412,7 @@ public final class AccountApi {
         return false;
     }
 
-    private JSONObject passportPost(String path, Map<String, String> form, String cookieExtra)
+    private PassportReply passportPost(String path, Map<String, String> form, String cookieExtra)
             throws IOException {
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> e : form.entrySet()) {
@@ -471,12 +485,9 @@ public final class AccountApi {
         // 这里不能再从 Account.load(context).cookie 起手：上面已经决定
         // 护照请求不带旧账号 cookie（换号场景），把旧 cookie 合回来会让
         // 新号的登录态里混进上一个号的 sessionid，后续内容请求就会串号。
-        lastCookie = mergeCookie("", r.cookieHeader());
-        // 打原始响应体：护照接口的错误全在 data.error_code/description 里，
-        // 只记 HTTP 状态看不出「为什么被拒」（1206 太频繁 / 1203 验证码错 /
-        // 7 设备被拒 全都是 HTTP 200）。这条日志是排查登录问题的唯一入口。
+        String replyCookies = mergeCookie("", r.cookieHeader());
         Log.d(TAG, path + " -> " + r.code + " setCookies=" + r.setCookies.size()
-                + " cookie=" + (lastCookie.isEmpty() ? "无" : "有")
+                + " cookie=" + (replyCookies.isEmpty() ? "无" : "有")
                 + " responseBytes=" + (r.body == null ? 0 : r.body.length()));
         if (r.code == 401 || r.code == 403) {
             if (r.body == null || r.body.trim().isEmpty()) {
@@ -488,7 +499,7 @@ public final class AccountApi {
             throw new IOException("登录服务无响应（HTTP " + r.code + "）");
         }
         try {
-            return new JSONObject(r.body);
+            return new PassportReply(new JSONObject(r.body), replyCookies);
         } catch (Exception e) {
             throw new IOException("登录服务返回了无法解析的内容");
         }

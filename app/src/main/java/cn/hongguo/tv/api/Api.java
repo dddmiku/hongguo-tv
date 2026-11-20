@@ -445,7 +445,7 @@ public final class Api {
      * @param offset     偏移
      * @param limit      一页条数（上游一般最多 18）
      */
-    public List<Series> browse(int genreIndex, String theme, String sort,
+    public BrowsePage browse(int genreIndex, String theme, String sort,
                                int offset, int limit) throws IOException {
         String[] g = GENRES[Math.max(0, Math.min(genreIndex, GENRES.length - 1))];
         try {
@@ -471,31 +471,45 @@ public final class Api {
             body.put("req_type", "only_content");
             body.put("client_req_type", 3);
 
-            JSONObject j = post("/reading/distribution/category/landpage/v", body.toString());
-            List<Series> out = new ArrayList<>();
-            JSONObject data = j.optJSONObject("data");
-            JSONArray items = data == null ? null : data.optJSONArray("video_data");
-            if (items == null) {
-                return out;
-            }
-            for (int i = 0; i < items.length(); i++) {
-                JSONObject o = items.optJSONObject(i);
-                Series s = Series.from(o);
-                if (s == null) {
-                    continue;
-                }
-                // 分类标签藏在 category_schema（JSON 字符串）里
-                s.category = categoriesOf(o);
-                s.premiere = tagText(o);
-                if (s.episodeCount == 0) {
-                    s.episodeCount = o.optInt("episode_cnt", 0);
-                }
-                out.add(s);
-            }
-            return out;
+            return browsePage(post("/reading/distribution/category/landpage/v", body.toString()), offset, limit);
         } catch (org.json.JSONException e) {
             throw new IOException("请求构造失败", e);
         }
+    }
+
+    public static final class BrowsePage {
+        public final List<Series> items;
+        public final int nextOffset;
+        public final boolean hasMore;
+
+        private BrowsePage(List<Series> items, int nextOffset, boolean hasMore) {
+            this.items = items;
+            this.nextOffset = nextOffset;
+            this.hasMore = hasMore;
+        }
+    }
+
+    static BrowsePage browsePage(JSONObject response, int offset, int limit) throws IOException {
+        JSONObject data = response.optJSONObject("data");
+        if (response.optInt("code", response.optInt("status_code", 0)) != 0 || data == null) {
+            throw new IOException("片单暂时不可用");
+        }
+        JSONArray rows = data.optJSONArray("video_data");
+        List<Series> items = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        int rowCount = rows == null ? 0 : rows.length();
+        for (int i = 0; i < rowCount; i++) {
+            JSONObject row = rows.optJSONObject(i);
+            Series series = Series.from(row);
+            if (series == null || !seen.add(series.seriesId)) continue;
+            series.category = categoriesOf(row);
+            series.premiere = tagText(row);
+            items.add(series);
+        }
+        int nextOffset = data.optInt("next_offset", offset + rowCount);
+        boolean hasMore = rowCount > 0 && nextOffset > offset
+                && data.optBoolean("has_more", rowCount >= limit);
+        return new BrowsePage(items, nextOffset, hasMore);
     }
 
     /** 从 category_schema 里抽分类名（形如 [{"name":"玄幻"},...]）。 */

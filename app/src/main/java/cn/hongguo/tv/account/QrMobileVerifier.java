@@ -29,7 +29,7 @@ final class QrMobileVerifier {
             query.put("last_min_read_timestamp_ms","0"); query.put("full_field","false");
             JSONObject history = reader.read("/reading/bookapi/read_history/list/v", query, verified);
             JSONObject shelf = reader.read("/reading/bookapi/bookshelf/video/list/v", null, verified);
-            requireList(history,"data_list"); requireList(shelf,"video_shelf_info");
+            requireHistoryList(history); requireRequiredList(shelf,"video_shelf_info");
             return verified;
         } catch (QrLoginManager.QrException error) {
             throw error;
@@ -46,9 +46,20 @@ final class QrMobileVerifier {
         return data != null && data.has("code") && "0".equals(String.valueOf(data.opt("code")));
     }
 
-    private static void requireList(JSONObject payload, String key) throws IOException {
+    private static void requireHistoryList(JSONObject payload) throws IOException {
         JSONObject data = payload == null ? null : payload.optJSONObject("data");
-        if (!ok(payload) || data == null || (data.has(key) && !(data.opt(key) instanceof JSONArray))) {
+        if (!ok(payload) || data == null) {
+            throw unavailable("扫码账号暂时无法读取手机历史或收藏，请重试或使用验证码登录");
+        }
+        for (String key : new String[]{"data_list", "read_history_list", "history_list", "list"}) {
+            if (data.opt(key) instanceof JSONArray) return;
+        }
+        throw unavailable("扫码账号暂时无法读取手机历史或收藏，请重试或使用验证码登录");
+    }
+
+    private static void requireRequiredList(JSONObject payload, String key) throws IOException {
+        JSONObject data = payload == null ? null : payload.optJSONObject("data");
+        if (!ok(payload) || data == null || !(data.opt(key) instanceof JSONArray)) {
             throw unavailable("扫码账号暂时无法读取手机历史或收藏，请重试或使用验证码登录");
         }
     }
