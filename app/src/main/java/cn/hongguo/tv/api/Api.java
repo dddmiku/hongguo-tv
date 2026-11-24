@@ -150,10 +150,28 @@ public final class Api {
         return h;
     }
 
+    /** 可测的完整 query 组装：含播放器路径的 manifest_version_code 注入。 */
+    static String playerQuery(Map<String, String> base, String path, Map<String, String> extra) {
+        Map<String, String> q = new LinkedHashMap<>(base);
+        if (extra != null) q.putAll(extra);
+        if (path.startsWith("/novel/player/") && q.get("manifest_version_code") == null) {
+            q.put("manifest_version_code", q.getOrDefault("version_code", "74332"));
+        }
+        return q.keySet().stream()
+                .map(key -> key + "=" + q.get(key))
+                .collect(java.util.stream.Collectors.joining("&"));
+    }
+
     private String url(String path, Map<String, String> extra) {
         Map<String, String> q = baseQuery();
         if (extra != null) {
             q.putAll(extra);
+        }
+        if (path.startsWith("/novel/player/") && q.get("manifest_version_code") == null) {
+            // 取流接口缺非空 manifest_version_code 时上游回 HTTP 200 + 0 字节
+            // （与桌面端 1.5.8 同一上游契约变更，A/B 已证实该值不被比对，
+            // 只要求非空）。仅对播放器路径注入，其他接口保持原契约。
+            q.put("manifest_version_code", q.getOrDefault("version_code", "74332"));
         }
         q.put("_rticket", String.valueOf(System.currentTimeMillis()));
         StringBuilder sb = new StringBuilder(HOST).append(path).append('?');
@@ -909,7 +927,14 @@ public final class Api {
         Map<String, String> q = new LinkedHashMap<>();
         q.put("video_id", vid);
         q.put("need_all_video_definition", "1");
-        JSONObject j = get("/reading/bookapi/video_tab/video_model/v1/", q);
+        JSONObject j;
+        try {
+            j = get("/reading/bookapi/video_tab/video_model/v1/", q);
+        } catch (IOException empty) {
+            // 桌面端 1.5.8 同款契约：空体或格式异常时再给一次机会，
+            // 偶发 0 字节响应重试即可恢复。
+            j = get("/reading/bookapi/video_tab/video_model/v1/", q);
+        }
         Log.d(TAG, "videoModel " + vid + " code=" + j.optInt("code")
                 + " tracks=" + trackCount(j));
         if (trackCount(j) >= 2) {

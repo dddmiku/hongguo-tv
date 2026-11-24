@@ -14,4 +14,22 @@ public class MobileVideoModelTest {
         assertEquals("requested",Api.findVideoModel(response,"12345678").getString("marker"));
         assertNull(Api.findVideoModel(response,"99999999"));
     }
+
+    @Test public void playerQueryGainsManifestVersionCodeOnlyForPlayerRoutes()throws Exception{
+        java.util.LinkedHashMap<String,String> base=new java.util.LinkedHashMap<>();
+        base.put("aid","8662");base.put("version_code","74332");
+        String player=Api.playerQuery(base,"/novel/player/multi_video_model/player/v1",null);
+        assertTrue(player.contains("manifest_version_code=74332"));
+        String other=Api.playerQuery(base,"/reading/bookapi/bookmall/tab/v",null);
+        assertFalse(other.contains("manifest_version_code"));
+    }
+    @Test public void playerQueryPreservesExistingManifestVersionCode()throws Exception{
+        java.util.LinkedHashMap<String,String> base=new java.util.LinkedHashMap<>();
+        base.put("version_code","74332");
+        java.util.LinkedHashMap<String,String> extra=new java.util.LinkedHashMap<>();
+        extra.put("manifest_version_code","111");
+        String query=Api.playerQuery(base,"/novel/player/video_model/v1",extra);
+        assertTrue(query.contains("manifest_version_code=111"));
+        assertFalse(query.contains("manifest_version_code=74332"));
+    }
 }
