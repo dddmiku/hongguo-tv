@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 
 import cn.hongguo.tv.api.Api;
+import cn.hongguo.tv.api.WebPlayback;
 import cn.hongguo.tv.cache.MediaCache;
 import cn.hongguo.tv.cache.PlayProgress;
 import cn.hongguo.tv.media.EpisodePreparer;
@@ -146,6 +147,10 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
 
     /** 当前清晰度上限，用于切换。 */
     private int capIndex;
+    /** Test-visible playback state; harmless in production. */
+    volatile int playbackPositionProbe;
+    volatile int playbackDurationProbe;
+    volatile String playbackStatusProbe = "";
     private static final int[] CAPS = {1080, 720, 480};
     private static final String[] CAP_NAMES = {"1080p", "720p", "480p"};
     /** 当前倍速下标。 */
@@ -427,6 +432,9 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
 
         final int cap = CAPS[capIndex];
         new Thread(() -> {
+            // Website route first: it serves a plain official-CDN MP4 without
+            // the SDK signer, which currently returns zero-byte bodies.
+            if (tryWebPlayback(request, ep, cap, cancellation)) return;
             try {
                 JSONObject j = api.videoModel(ep.vid);
                 JSONObject vm = Api.findVideoModel(j, ep.vid);
@@ -486,6 +494,36 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     private boolean currentPlayer(MediaPlayer candidate, int request) {
         return candidate == player && request == loadGeneration && playbackUiActive()
                 && foreground && samePlaybackAccount();
+    }
+
+    /**
+     * Resolve the episode through the official website route and download it
+     * like any other unencrypted track. Returns true when preparation started.
+     */
+    private boolean tryWebPlayback(int request, Ep ep, int cap, PreparationCancellation cancellation) {
+        try {
+            String cookie = cn.hongguo.tv.account.Account.load(this).cookie;
+            WebPlayback.Result result = WebPlayback.resolve(ep.vid, seriesId, cap + "p", cookie);
+            TrackPicker.Track track = TrackPicker.direct(result.url, result.definition);
+            postLoad(request, () -> { actualDefinition = track.definition; updateQualityLabel(); });
+            synchronized (preparationLock) {
+                if (request != loadGeneration) return true;
+                preparer.prepare(ep.vid, track, cancellation, new EpisodePreparer.Listener() {
+                    @Override public void onProgress(String stage, int pct) {
+                        postLoad(request, () -> setStatus("第 " + ep.num + " 集 " + stage
+                                + (pct > 0 && pct < 100 ? " " + pct + "%" : "")));
+                    }
+                    @Override public void onDone(java.io.File plain) {
+                        postLoad(request, () -> startPlayback(plain, ep.num));
+                    }
+                    @Override public void onError(String message) { postLoad(request, () -> fail(message)); }
+                });
+            }
+            return true;
+        } catch (Throwable error) {
+            Log.i(TAG, "官网通道不可用，回退签名取流: " + error.getMessage());
+            return false;
+        }
     }
 
     private void startPlayback(File f, int epNum) {
@@ -679,6 +717,8 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
                 try {
                     int pos = player.getCurrentPosition();
                     int dur = player.getDuration();
+                    playbackPositionProbe = pos;
+                    playbackDurationProbe = dur;
                     if (armAfterSeekAdvance && !userPaused && player.isPlaying()
                             && pos > seekSettledPosition + 100) {
                         armAfterSeekAdvance = false;
@@ -1058,6 +1098,7 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     }
 
     private void setStatus(String s) {
+        playbackStatusProbe = s == null ? "" : s;
         if (!playbackUiActive()) return;
         status.setText(s);
         Log.i(TAG, s);

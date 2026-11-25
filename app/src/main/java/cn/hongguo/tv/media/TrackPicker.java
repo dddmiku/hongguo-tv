@@ -102,6 +102,21 @@ public final class TrackPicker {
      * @param model video_model JSON（可能被上游包成字符串）
      * @param cap   分辨率上限（480/720/1080）；0 表示不限制
      */
+    /**
+     * Build a track for an already-resolved official CDN MP4 (website route).
+     * The URL is plain H.264, so no decrypt step is needed.
+     */
+    public static Track direct(String url, String definition) throws Exception {
+        JSONObject raw = new JSONObject();
+        raw.put("main_url", url);
+        raw.put("video_meta", new JSONObject().put("definition",
+                definition == null || definition.isEmpty() ? "720p" : definition));
+        int side = 720;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("([0-9]{3,4})p").matcher(String.valueOf(definition));
+        if (matcher.find()) side = Integer.parseInt(matcher.group(1));
+        return new Track(raw, side + "p", "h264", 0, 0, 0, url, "", "", false);
+    }
+
     public static Track pick(JSONObject model, int cap) throws Exception {
         JSONArray list = tracksOf(model);
         Track best = null;

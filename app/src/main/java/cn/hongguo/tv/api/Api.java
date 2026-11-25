@@ -141,6 +141,11 @@ public final class Api {
         Map<String, String> h = new LinkedHashMap<>();
         h.put("user-agent", UA);
         h.put("accept", "application/json");
+        // The desktop client always sends these two; without them the player
+        // model routes answer HTTP 200 with a zero-byte body on this account.
+        h.put("x-tt-store-region", "cn");
+        h.put("x-tt-store-region-src", "did");
+        h.put("passport-sdk-version", "5051452");
         cn.hongguo.tv.account.Account account = cn.hongguo.tv.account.Account.load(context);
         if (!account.cookie.isEmpty()) h.put("cookie", account.cookie);
         if (!account.token.isEmpty()) h.put("x-tt-token", account.token);
@@ -150,11 +155,17 @@ public final class Api {
         return h;
     }
 
-    /** 可测的完整 query 组装：含播放器路径的 manifest_version_code 注入。 */
+    /** 需要 manifest_version_code 的播放器数据接口（缺该参数上游回 200+0 字节）。
+     * 桌面端 A/B 只证实 /novel/player/ 需要；video_tab 注入反而会拿到空体。 */
+    static boolean needsManifestVersion(String path) {
+        return path.startsWith("/novel/player/");
+    }
+
+    /** 可测的完整 query 组装：含播放器数据路径的 manifest_version_code 注入。 */
     static String playerQuery(Map<String, String> base, String path, Map<String, String> extra) {
         Map<String, String> q = new LinkedHashMap<>(base);
         if (extra != null) q.putAll(extra);
-        if (path.startsWith("/novel/player/") && q.get("manifest_version_code") == null) {
+        if (needsManifestVersion(path) && q.get("manifest_version_code") == null) {
             q.put("manifest_version_code", q.getOrDefault("version_code", "74332"));
         }
         return q.keySet().stream()
@@ -167,10 +178,11 @@ public final class Api {
         if (extra != null) {
             q.putAll(extra);
         }
-        if (path.startsWith("/novel/player/") && q.get("manifest_version_code") == null) {
+        if (needsManifestVersion(path) && q.get("manifest_version_code") == null) {
             // 取流接口缺非空 manifest_version_code 时上游回 HTTP 200 + 0 字节
             // （与桌面端 1.5.8 同一上游契约变更，A/B 已证实该值不被比对，
-            // 只要求非空）。仅对播放器路径注入，其他接口保持原契约。
+            // 只要求非空）。覆盖 /novel/player/ 与 /reading/bookapi/video_tab/
+            // 两条真实取流路由，其他接口保持原契约。
             q.put("manifest_version_code", q.getOrDefault("version_code", "74332"));
         }
         q.put("_rticket", String.valueOf(System.currentTimeMillis()));
@@ -307,18 +319,45 @@ public final class Api {
         java.util.Set<String> seen = new java.util.HashSet<>();
         int offset = 0;
         String session = UUID.randomUUID().toString();
+        // session_id / rank_version are server-issued continuations: without
+        // them the upstream repeats the first page (16-17 rows) instead of
+        // advancing. Mirrors the desktop client's series ranking reader.
+        String sessionId = "", rankVersion = "";
         for (int page = 0; page < 6 && out.size() < limit; page++) {
             if (Thread.currentThread().isInterrupted()) throw new IOException("榜单请求已取消");
-            RankPage batch = rankPage(get("/reading/bookapi/bookmall/cell/change/v",
-                    rankQuery(category, board, offset, session)), category, offset);
+            Map<String, String> query = rankQuery(category, board, offset, session);
+            if (!sessionId.isEmpty()) query.put("session_id", sessionId);
+            if (!rankVersion.isEmpty()) query.put("rank_version", rankVersion);
+            JSONObject reply = get("/reading/bookapi/bookmall/cell/change/v", query);
+            RankPage batch = rankPage(reply, category, offset);
             for (Series series : batch.items) if (seen.add(series.seriesId)) {
                 series.rank = out.size() + 1;
                 out.add(series);
             }
             if (!batch.hasMore) break;
             offset = batch.nextOffset;
+            JSONObject nextSession = rankContinuation(reply);
+            sessionId = nextSession.optString("session_id", sessionId);
+            rankVersion = nextSession.optString("rank_version", rankVersion);
+            if (sessionId.length() > 1024 || rankVersion.length() > 1024) break;
         }
         return out.size() > limit ? new ArrayList<>(out.subList(0, limit)) : out;
+    }
+
+    /** Server-issued ranking continuation; data-level wins over cell_view-level. */
+    static JSONObject rankContinuation(JSONObject reply) {
+        JSONObject result = new JSONObject();
+        JSONObject data = reply == null ? null : reply.optJSONObject("data");
+        JSONObject view = data == null ? null : data.optJSONObject("cell_view");
+        for (String name : new String[]{"session_id", "rank_version"}) {
+            String value = data != null ? data.optString(name, "") : "";
+            if (value.isEmpty() && view != null) value = view.optString(name, "");
+            if (!value.isEmpty()) {
+                try { result.put(name, value); }
+                catch (org.json.JSONException ignored) { return new JSONObject(); }
+            }
+        }
+        return result;
     }
 
     /** Confirmed from the upstream ranking selector and live responses. */
@@ -397,8 +436,13 @@ public final class Api {
             if (rec != null) series.hot = rec.optString("RecommendText", series.hot);
             page.items.add(series);
         }
-        page.nextOffset = view.optInt("next_offset", offset + cells.length());
-        page.hasMore = cells.length() > 0 && view.optBoolean("has_more", false) && page.nextOffset > offset;
+        // cell_view is authoritative, but some responses carry the pagination
+        // fields on data instead. Read both before deciding the page is done.
+        page.nextOffset = view.optInt("next_offset",
+                data.optInt("next_offset", offset + cells.length()));
+        boolean more = view.has("has_more") ? view.optBoolean("has_more", false)
+                : data.optBoolean("has_more", false);
+        page.hasMore = cells.length() > 0 && more && page.nextOffset > offset;
         return page;
     }
 
@@ -919,11 +963,19 @@ public final class Api {
      * 换成已注册身份后立刻回 5 档（360p~1080p，全 bytevc1）。
      */
     public JSONObject videoModel(String vid) throws IOException {
+        // Contract 1: legacy player-bucket route.
         JSONObject modern = multiVideoModel(vid);
         int code = modern.optInt("code", 0);
         if (code==401||code==403||code==8||code==1001) throw new IOException("手机登录态已失效，请重新登录后播放");
         if (code==110001||code==100001||code==100002) throw new IOException("手机播放暂时受限，请稍后重试");
         if (findVideoModel(modern, vid) != null) return modern;
+        // Contract 2: the plain /novel/player/multi_video_model/v1/ route the
+        // desktop client uses. The player-bucket route can return 200+0 bytes
+        // while this one still serves the real model.
+        JSONObject plain = plainMultiVideoModel(vid);
+        int plainCode = plain.optInt("code", 0);
+        if (plainCode==401||plainCode==403||plainCode==8||plainCode==1001) throw new IOException("手机登录态已失效，请重新登录后播放");
+        if (findVideoModel(plain, vid) != null) return plain;
         Map<String, String> q = new LinkedHashMap<>();
         q.put("video_id", vid);
         q.put("need_all_video_definition", "1");
@@ -934,6 +986,10 @@ public final class Api {
             // 桌面端 1.5.8 同款契约：空体或格式异常时再给一次机会，
             // 偶发 0 字节响应重试即可恢复。
             j = get("/reading/bookapi/video_tab/video_model/v1/", q);
+        }
+        if (j == null || j.optInt("code", -1) != 0) {
+            // 单档 GET 路由本次不可用（空体/业务失败），继续走批量接口兜底。
+            Log.w(TAG, "videoModel " + vid + " 单档接口不可用，回退批量接口");
         }
         Log.d(TAG, "videoModel " + vid + " code=" + j.optInt("code")
                 + " tracks=" + trackCount(j));
@@ -971,6 +1027,34 @@ public final class Api {
             return j;
         } catch (Exception e) {
             Log.w(TAG, "multiVideoModel 失败，保留 GET 结果", e);
+            return new JSONObject();
+        }
+    }
+
+    /** Desktop-compatible batch route: /novel/player/multi_video_model/v1/. */
+    private JSONObject plainMultiVideoModel(String vid) {
+        try {
+            org.json.JSONObject biz = new org.json.JSONObject();
+            biz.put("detail_page_version", 0);
+            biz.put("device_level", 3);
+            biz.put("disable_digg_stat", false);
+            biz.put("disable_video_relate_book", false);
+            biz.put("need_all_video_definition", true);
+            biz.put("need_mp4_align", false);
+            biz.put("use_os_player", false);
+            biz.put("use_server_dns", false);
+            biz.put("video_platform", 1024);
+            org.json.JSONObject map = new org.json.JSONObject();
+            map.put("1", new org.json.JSONArray().put(vid));
+            org.json.JSONObject body = new org.json.JSONObject();
+            body.put("biz_param", biz);
+            body.put("mixed_video_id_map", map);
+            JSONObject j = post("/novel/player/multi_video_model/v1/", body.toString());
+            Log.d(TAG, "plainMultiVideoModel " + vid + " code=" + j.optInt("code")
+                    + " tracks=" + trackCount(j));
+            return j;
+        } catch (Exception e) {
+            Log.w(TAG, "plainMultiVideoModel 失败", e);
             return new JSONObject();
         }
     }

@@ -101,4 +101,23 @@ public class RankPageTest {
         return new JSONObject().put("code", 0).put("data", new JSONObject().put("cell_view",
                 new JSONObject().put("cell_data", cells).put("has_more", more).put("next_offset", next)));
     }
+
+    @Test public void dataLevelPaginationFieldsAreUsedWhenCellViewOmitsThem() throws Exception {
+        JSONObject reply = new JSONObject().put("code", 0).put("data", new JSONObject()
+                .put("cell_view", new JSONObject().put("cell_data", new JSONArray().put(cell(video()))))
+                .put("has_more", true).put("next_offset", 21));
+        Api.RankPage page = Api.rankPage(reply, "series", 20);
+        assertEquals(1, page.items.size());
+        assertEquals(21, page.nextOffset);
+        assertTrue(page.hasMore);
+    }
+
+    @Test public void serverIssuedContinuationIsReadFromDataThenCellView() throws Exception {
+        JSONObject reply = new JSONObject().put("code", 0).put("data", new JSONObject()
+                .put("session_id", "server-session").put("rank_version", "7")
+                .put("cell_view", new JSONObject().put("cell_data", new JSONArray()).put("session_id", "ignored")));
+        JSONObject continuation = Api.rankContinuation(reply);
+        assertEquals("server-session", continuation.optString("session_id"));
+        assertEquals("7", continuation.optString("rank_version"));
+    }
 }

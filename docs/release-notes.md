@@ -1,3 +1,14 @@
+红果客厅 TV 1.3.7 · 2026-11-26 · 真机播放修复与系列剧榜单（ARM64）
+
+本版适用于 64 位 ARM Android TV / 盒子；32 位暂不包含在这次发布中。
+
+- 修复真机无法播放（黑屏 / 接口无响应 HTTP 200）：App 签名取流路由在当前上游对部分设备恒返回 0 字节。新增官网播放通道作为首选——`/api/video/protected/fallback-play-info` 提供未加密普通 MP4 直链，下载后走原有本地播放链路。
+- 说明：`/api/video/protected/play-info` 返回 DASH + CENC 加密分片，平台播放器无法打开，黑屏即源于此；因此优先使用 fallback 的渐进式 MP4。
+- 官网通道不可用时自动回退签名取流与批量接口。
+- 修复系列剧榜单只显示 16 部：补上服务器下发的 `session_id` / `rank_version` 续页游标，并兼容 data 级 `has_more` / `next_offset`。真机实测 50 部。
+
+覆盖安装 hongguo-tv-1.3.7.APK，不要卸载。沿用 cn.hongguo.tv 与正式签名，versionCode 23，账号、历史、追剧和设置保留。
+
 红果客厅 TV 1.3.6 · 2026-11-25 · 播放取流修复（ARM64）
 
 本版适用于 64 位 ARM Android TV / 盒子；32 位暂不包含在这次发布中。
