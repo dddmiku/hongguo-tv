@@ -1,4 +1,4 @@
-红果客厅 TV 1.3.7 · 2026-11-26 · 真实 App 签名播放恢复（ARM64）
+红果客厅 TV 1.3.8 · 2026-11-26 · 真实 App 签名播放恢复（ARM64）
 
 本版适用于 64 位 ARM Android TV / 盒子；32 位暂不包含在这次发布中。
 
@@ -8,7 +8,7 @@
 - 官网通道降级为兜底，仅在 App 通道异常时启用。
 - 修复系列剧榜单只显示 16 部：补上 `session_id` / `rank_version` 续页游标，兼容 data 级 `has_more` / `next_offset`。实测 50 部。
 
-覆盖安装 hongguo-tv-1.3.7.APK，不要卸载。沿用 cn.hongguo.tv 与正式签名，versionCode 23，账号、历史、追剧和设置保留。
+覆盖安装 hongguo-tv-1.3.8.APK，不要卸载。沿用 cn.hongguo.tv 与正式签名，versionCode 24，账号、历史、追剧和设置保留。
 
 红果客厅 TV 1.3.6 · 2026-11-25 · 播放取流修复（ARM64）
 
