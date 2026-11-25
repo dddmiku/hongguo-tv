@@ -35,15 +35,16 @@ public class RankingsActivity extends TvActivity {
             category = saved.getString("rank-category", "series");
             board = saved.getString("rank-board", "recommend");
         }
-        if (!"series".equals(category) && !"comic".equals(category)) category = "series";
+        if (!"series".equals(category) && !"comic".equals(category)
+                && !"short_play".equals(category) && !"ai_series".equals(category)) category = "series";
         if (!validBoard(category, board)) board = "recommend";
         buildUi();
         load();
     }
 
     private static boolean validBoard(String category, String board) {
-        return "recommend".equals(board) || "new".equals(board)
-                || ("comic".equals(category) && "hot".equals(board));
+        if ("series".equals(category)) return "recommend".equals(board) || "new".equals(board);
+        return "recommend".equals(board) || "new".equals(board) || "hot".equals(board);
     }
 
     private void buildUi() {
@@ -80,7 +81,9 @@ public class RankingsActivity extends TvActivity {
         Object tag = focused == null ? null : focused.getTag();
         categories.removeAllViews();
         boards.removeAllViews();
-        String[][] types = {{"系列剧", "series"}, {"漫剧", "comic"}};
+        // Same category set as the desktop client: series, comic, short play, AI.
+        String[][] types = {{"系列剧", "series"}, {"漫剧", "comic"},
+                {"真人短剧", "short_play"}, {"AI 剧", "ai_series"}};
         for (String[] type : types) {
             TextView tab = TvUi.tab(this, type[0], category.equals(type[1]), () -> {
                 if (category.equals(type[1])) return;
@@ -143,7 +146,9 @@ public class RankingsActivity extends TvActivity {
     }
 
     private String label() {
-        String type = "series".equals(category) ? "系列剧" : "漫剧";
+        String type = "series".equals(category) ? "系列剧"
+                : "comic".equals(category) ? "漫剧"
+                : "short_play".equals(category) ? "真人短剧" : "AI 剧";
         String selected = "new".equals(board) ? ("series".equals(category) ? "新季榜" : "新剧榜")
                 : "hot".equals(board) ? "热播榜" : "推荐榜";
         return type + " · " + selected;

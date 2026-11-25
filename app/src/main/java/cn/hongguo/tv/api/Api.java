@@ -315,6 +315,30 @@ public final class Api {
 
     /** Official series-album or comic ranking; never substitutes a browse sort. */
     public List<Series> rank(String category, String board, int limit) throws IOException {
+        // The desktop client builds these two boards from the category browse
+        // endpoint; the ranking cell route only carries series/comic.
+        if ("short_play".equals(category) || "ai_series".equals(category)) {
+            int genreIndex = 0;
+            for (int i = 0; i < GENRES.length; i++) if (GENRES[i][2].equals(category)) genreIndex = i;
+            String sort = "new".equals(board) ? "online_time" : "hot_score";
+            String[] boardCheck = {"hot", "recommend", "new"};
+            if (!java.util.Arrays.asList(boardCheck).contains(board))
+                throw new IllegalArgumentException("该分类不支持此榜单");
+            List<Series> out = new ArrayList<>();
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            int offset = 0;
+            for (int page = 0; page < 12 && out.size() < limit; page++) {
+                if (Thread.currentThread().isInterrupted()) throw new IOException("榜单请求已取消");
+                BrowsePage batch = browse(genreIndex, "", sort, offset, 20);
+                for (Series series : batch.items) if (seen.add(series.seriesId)) {
+                    series.rank = out.size() + 1;
+                    out.add(series);
+                }
+                if (!batch.hasMore || batch.nextOffset <= offset) break;
+                offset = batch.nextOffset;
+            }
+            return out.size() > limit ? new ArrayList<>(out.subList(0, limit)) : out;
+        }
         List<Series> out = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
         int offset = 0;
@@ -323,7 +347,9 @@ public final class Api {
         // them the upstream repeats the first page (16-17 rows) instead of
         // advancing. Mirrors the desktop client's series ranking reader.
         String sessionId = "", rankVersion = "";
-        for (int page = 0; page < 6 && out.size() < limit; page++) {
+        // A full series board is ~99 rows over 10 pages. The old 6-page cap
+        // truncated it at 50 no matter what limit the caller asked for.
+        for (int page = 0; page < 20 && out.size() < limit; page++) {
             if (Thread.currentThread().isInterrupted()) throw new IOException("榜单请求已取消");
             Map<String, String> query = rankQuery(category, board, offset, session);
             if (!sessionId.isEmpty()) query.put("session_id", sessionId);
