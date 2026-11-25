@@ -16,7 +16,20 @@ REPO="dddmiku/hongguo-tv"
 API="https://api.github.com/repos/"+REPO
 SIGNING_CERT="7009c6ca8eedca64e259e16964e4112f6b181aaf7e47d9680a8d05b33af364e8"
 
+def current_release_notes(path, version):
+    """Select exactly one version from the chronological release-notes document."""
+    text = Path(path).read_text(encoding="utf-8")
+    sections = list(re.finditer(r"(?m)^红果客厅 TV (?P<version>[0-9]+\.[0-9]+\.[0-9]+) (?=·)", text))
+    selected = [index for index, section in enumerate(sections) if section.group("version") == version]
+    if len(selected) != 1:
+        raise RuntimeError("当前版本更新说明缺失或重复：" + version)
+    index = selected[0]
+    end = sections[index + 1].start() if index + 1 < len(sections) else len(text)
+    return text[sections[index].start():end].strip() + "\n"
+
+
 def version():
+
     source=(ROOT/"app/build.gradle").read_text(encoding="utf-8")
     return re.search(r'versionName\s+"([0-9.]+)"',source).group(1),int(re.search(r'versionCode\s+(\d+)',source).group(1))
 
@@ -99,7 +112,7 @@ def publish(source_commit):
     apk=ROOT/"app/build/outputs/apk/release"/("hongguo-tv-"+tv_version+".apk")
     if not apk.is_file():raise RuntimeError("正式签名安装包尚未生成")
     verify_signature(apk)
-    notes=(ROOT/"docs/release-notes.md").read_text(encoding="utf-8")
+    notes=current_release_notes(ROOT/"docs/release-notes.md", tv_version)
     staging=ROOT/"_work/release";staging.mkdir(parents=True,exist_ok=True)
     public_apk=staging/("hongguo-tv-"+tv_version+".APK");shutil.copyfile(apk,public_apk)
     latest=staging/"latest.json";latest.write_text(json.dumps(feed(tv_version,code,public_apk,notes),ensure_ascii=False,indent=2),encoding="utf-8")
