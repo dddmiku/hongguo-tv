@@ -38,7 +38,18 @@ public final class RequestSigner {
         synchronized(RequestSigner.class){
             try{
                 initialize(url);
-                Object result=ms.bd.c.m.a(33554438,0,manager,url,body);
+                long httpManager=MS.sHttpManager;
+                Object result;
+                if(httpManager!=0L){
+                    // Header-ABI security call: the SDK receives the request URL
+                    // plus every header that participates in the signature as a
+                    // flat name/value String[] (the SDK adds its own X-* values).
+                    String[][] built=headerPairs(headers);
+                    result=ms.bd.c.m.a(50331649,0,httpManager,url,built[1]);
+                }else{
+                    // Fallback for SDK builds without the manager callback.
+                    result=ms.bd.c.m.a(33554438,0,manager,url,body);
+                }
                 if(!(result instanceof String[]))throw new IOException("内容验证暂不可用");
                 String[] pairs=(String[])result;
                 Map<String,String> output=new LinkedHashMap<>();
@@ -53,6 +64,30 @@ public final class RequestSigner {
             }catch(IOException error){throw error;}
             catch(Throwable error){throw new IOException("本机播放组件暂不可用");}
         }
+    }
+
+    private static final java.util.Set<String> SDK_HEADERS=new java.util.HashSet<>(java.util.Arrays.asList(
+            "x-argus","x-gorgon","x-helios","x-khronos","x-ladon","x-medusa"));
+
+    /** Flat name/value header list for the header-ABI call; SDK headers are excluded. */
+    private static String[][] headerPairs(Map<String,String> source)throws IOException{
+        java.util.LinkedHashMap<String,String> clean=new java.util.LinkedHashMap<>();
+        for(Map.Entry<String,String> entry:source.entrySet()){
+            String name=entry.getKey(),value=entry.getValue();
+            if(name==null||value==null)continue;
+            if(name.isEmpty())throw new IOException("请求头格式不正确");
+            for(int ci=0;ci<name.length();ci++){char cc=name.charAt(ci);if(cc<0x21||cc>0x7e)throw new IOException("请求头格式不正确");}
+            if(value.indexOf('\r')>=0||value.indexOf('\n')>=0)throw new IOException("请求头格式不正确");
+            String canonical=name.toLowerCase(java.util.Locale.ROOT);
+            if(SDK_HEADERS.contains(canonical))continue;
+            clean.put(name,value);
+        }
+        String[] pairs=new String[clean.size()*2];
+        int at=0;
+        for(Map.Entry<String,String> entry:clean.entrySet()){
+            pairs[at++]=entry.getKey();pairs[at++]=entry.getValue();
+        }
+        return new String[][]{{"count",String.valueOf(clean.size())},pairs};
     }
 
     private void initialize(String url)throws Exception{

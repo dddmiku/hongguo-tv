@@ -432,13 +432,22 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
 
         final int cap = CAPS[capIndex];
         new Thread(() -> {
-            // Website route first: it serves a plain official-CDN MP4 without
-            // the SDK signer, which currently returns zero-byte bodies.
-            if (tryWebPlayback(request, ep, cap, cancellation)) return;
+            // Real app route first: the SDK signer now uses the header-ABI
+            // security call (50331649), which upstream accepts.
             try {
-                JSONObject j = api.videoModel(ep.vid);
-                JSONObject vm = Api.findVideoModel(j, ep.vid);
+                JSONObject j;
+                JSONObject vm;
+                try {
+                    j = api.videoModel(ep.vid);
+                    vm = Api.findVideoModel(j, ep.vid);
+                } catch (java.io.IOException error) {
+                    Log.i(TAG, "App 取流失败，尝试官网通道: " + error.getMessage());
+                    if (tryWebPlayback(request, ep, cap, cancellation)) return;
+                    throw error;
+                }
                 if (vm == null) {
+                    Log.i(TAG, "App 取流无轨道，尝试官网通道");
+                    if (tryWebPlayback(request, ep, cap, cancellation)) return;
                     postLoad(request, () -> fail("取流失败"));
                     return;
                 }

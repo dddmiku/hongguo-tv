@@ -1,11 +1,12 @@
-红果客厅 TV 1.3.7 · 2026-11-26 · 真机播放修复与系列剧榜单（ARM64）
+红果客厅 TV 1.3.7 · 2026-11-26 · 真实 App 签名播放恢复（ARM64）
 
 本版适用于 64 位 ARM Android TV / 盒子；32 位暂不包含在这次发布中。
 
-- 修复真机无法播放（黑屏 / 接口无响应 HTTP 200）：App 签名取流路由在当前上游对部分设备恒返回 0 字节。新增官网播放通道作为首选——`/api/video/protected/fallback-play-info` 提供未加密普通 MP4 直链，下载后走原有本地播放链路。
-- 说明：`/api/video/protected/play-info` 返回 DASH + CENC 加密分片，平台播放器无法打开，黑屏即源于此；因此优先使用 fallback 的渐进式 MP4。
-- 官网通道不可用时自动回退签名取流与批量接口。
-- 修复系列剧榜单只显示 16 部：补上服务器下发的 `session_id` / `rank_version` 续页游标，并兼容 data 级 `has_more` / `next_offset`。真机实测 50 部。
+- 修复真机无法播放（黑屏 / 接口无响应 HTTP 200）。根因：签名器一直用 `33554438` 直接调用，而上游只认 HTTP manager 回调的 `50331649` 安全调用。`MS.b()` 之前把 SDK 交来的 httpManager 句柄直接返回成 `Boolean.TRUE`，等于丢掉了鉴权凭据。
+- 现在捕获真实 httpManager，按 header-ABI 契约（请求 URL + 参与签名的全部头对）调用安全接口；签名取流恢复为**播放主路径**，不再依赖网页源。
+- 默认清晰度 1080p：真实设备解码实测 1920×1080 画面，可手动切 720p / 480p。
+- 官网通道降级为兜底，仅在 App 通道异常时启用。
+- 修复系列剧榜单只显示 16 部：补上 `session_id` / `rank_version` 续页游标，兼容 data 级 `has_more` / `next_offset`。实测 50 部。
 
 覆盖安装 hongguo-tv-1.3.7.APK，不要卸载。沿用 cn.hongguo.tv 与正式签名，versionCode 23，账号、历史、追剧和设置保留。
 

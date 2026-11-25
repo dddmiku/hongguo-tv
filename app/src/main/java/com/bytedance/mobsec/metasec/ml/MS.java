@@ -25,6 +25,9 @@ public class MS extends ms.bd.c.a4.a {
     public static int sVersionCode = 74332;
     public static android.content.Context sContext;
 
+    /** HTTP manager handle reported by the SDK; required by the security call. */
+    public static volatile long sHttpManager;
+
     /**
      * metasec 的 native → Java 回调分发器。
      *
@@ -37,6 +40,11 @@ public class MS extends ms.bd.c.a4.a {
                 // files 目录下 metasec 自己的数据目录
                 return sFilesDir + "/.msdata";
             case 33554433:
+                // The SDK hands us the HTTP manager handle here. The desktop
+                // signer requires this exact value for the 50331649 security
+                // call; returning Boolean.TRUE silently broke playback.
+                if (a2 != 0L) sHttpManager = a2;
+                return Boolean.TRUE;
             case 33554434:
                 return Boolean.TRUE;
             case 16777232:
