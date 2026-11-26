@@ -37,13 +37,16 @@ android {
         // + 内置数字键盘（遥控器直接输手机号/验证码）+ Accept-Encoding 参与签名
         // 1.0.9：数字键盘改为按需弹出（聚焦输入框/点「输入号码」才显示，
         // 焦点离开自动收起，另有显式「收起」按钮）
-        versionCode 26
-        versionName "1.3.10"
+        // 1.3.11：修复部分电视显示“没有可播放的清晰度”（按 PC 客户端重取
+        // 兼容 App 轨道、按分辨率校验解码能力）；同时打包 arm64 + armv7。
+        versionCode 27
+        versionName "1.3.11"
 
 
         ndk {
-            // 只打 arm 架构：电视/盒子全是 ARM，x86 模拟器不支持签名 so。
-            abiFilters 'arm64-v8a'
+            // 电视/盒子都是 ARM。同时打包 64 位与 32 位：新版盒子以 arm64 为主，
+            // 老电视/低配盒子仍可能是 armeabi-v7a。x86 模拟器没有对应签名 so。
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
         }
     }
 
@@ -88,6 +91,11 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // JVM 单测里 android.util.Log 等框架方法返回默认值，避免为了日志去 mock 整个 Android。
+    testOptions {
+        unitTests.returnDefaultValues = true
     }
 
     // JNA 的 so 必须保持原样，不能被压缩（运行时按路径加载）。

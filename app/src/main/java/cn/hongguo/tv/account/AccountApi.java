@@ -1,6 +1,7 @@
 package cn.hongguo.tv.account;
 
 import android.content.Context;
+import android.os.Build;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -358,7 +359,7 @@ public final class AccountApi {
         f.put("os_version", "12");
         f.put("os_api", "32");
         f.put("rom_version", "V417IR release-keys");
-        f.put("host_abi", "arm64-v8a");
+        f.put("host_abi", hostAbi());
         f.put("channel", "vivo_8662_64");
         f.put("ac", "wifi");
         f.put("ssmix", "a");
@@ -778,5 +779,13 @@ public final class AccountApi {
         public int total = 0;
         public long position = 0;
         public long updatedAt = 0;
+    }
+
+    /** Report the real install ABI; a 32-bit app must not claim arm64 to upstream. */
+    static String hostAbi(){
+        for(String abi:Build.SUPPORTED_ABIS){
+            if("arm64-v8a".equals(abi)||"armeabi-v7a".equals(abi))return abi;
+        }
+        return "armeabi-v7a";
     }
 }

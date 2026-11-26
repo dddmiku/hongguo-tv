@@ -119,51 +119,66 @@ public final class TrackPicker {
 
     public static Track pick(JSONObject model, int cap) throws Exception {
         JSONArray list = tracksOf(model);
-        Track best = null;
-        long bestScore = Long.MAX_VALUE;
-
-        for (int i = 0; i < list.length() && i < 32; i++) {
-            JSONObject t = list.optJSONObject(i);
-            if (t == null) {
-                continue;
-            }
-            JSONObject meta = t.optJSONObject("video_meta");
-            if (meta == null) {
-                meta = t;
-            }
-            String codec = meta.optString("codec_type", t.optString("codec_type", ""));
-            long size = meta.optLong("size", t.optLong("size", 0));
-            int w = meta.optInt("vwidth", t.optInt("vwidth", 0));
-            int h = meta.optInt("vheight", t.optInt("vheight", 0));
-            String def = meta.optString("definition", "").toLowerCase(Locale.US);
-            if (size <= 0 || size > MAX_BYTES || w <= 0 || h <= 0) {
-                continue;
-            }
-            if (!isDecodable(codec)) {
-                continue;   // bv2C 直接跳过，选它必崩
-            }
-            int shortEdge = Math.min(w, h);
-            if (cap > 0 && shortEdge > cap) {
-                continue;
-            }
-            if (!deviceSupports(codec, w, h)) {
-                continue;
-            }
-
-            // 分档：1080=0 / 720=1 / 540=2 / 480=3 / 更低=4
-            int tier = shortEdge >= 1080 ? 0 : shortEdge >= 720 ? 1
-                    : shortEdge >= 540 ? 2 : shortEdge >= 480 ? 3 : 4;
-            // 同档优先体积小的（省内存、起播快）
-            long score = tier * 1000000L + size / 1024;
-            if (score < bestScore) {
-                bestScore = score;
-                best = build(t, meta, def, codec, w, h, size);
-            }
-        }
+        Track best = select(list, cap, (codec, w, h) -> deviceSupports(codec, w, h),
+                (t, meta, def, codec, w, h, size) -> build(t, meta, def, codec, w, h, size));
         if (best == null) {
-            throw new IllegalStateException("没有可播放的清晰度（可能是编码不支持）");
+            throw new NoDecodableTrackException("没有可播放的清晰度（可能是编码不支持）");
         }
         Log.i(TAG, "选中轨道 " + best);
+        return best;
+    }
+
+    /** A minimal model row for tests and diagnostics; no Android codec APIs involved. */
+    /** Signals that every upstream track is undecodable on this device. */
+    public static final class NoDecodableTrackException extends IllegalStateException {
+        NoDecodableTrackException(String message){super(message);}
+    }
+    public static final class Candidate {
+        public final JSONObject raw, meta;
+        public final String definition, codec;
+        public final int width, height;
+        public final long size;
+        Candidate(JSONObject raw,JSONObject meta,String definition,String codec,int width,int height,long size){
+            this.raw=raw;this.meta=meta;this.definition=definition;this.codec=codec;this.width=width;this.height=height;this.size=size;
+        }
+    }
+    public interface Caps { boolean supports(String codec,int width,int height); }
+    public interface Factory { Track create(JSONObject raw,JSONObject meta,String definition,String codec,int width,int height,long size); }
+
+    /**
+     * Pick within the preferred cap; if nothing decodes there, retry every
+     * lower/higher definition before telling the user the device cannot play.
+     * A UI quality cap is a preference, not a reason to show an empty playback.
+     */
+    static Track select(JSONArray list,int cap,Caps caps,Factory factory){
+        Track preferred=selectWithin(list,cap,true,caps,factory);
+        if(preferred!=null)return preferred;
+        Track fallback=selectWithin(list,0,false,caps,factory);
+        if(fallback!=null)Log.i(TAG,"清晰度上限内无可用轨道，已回退到 "+fallback);
+        return fallback;
+    }
+
+    private static Track selectWithin(JSONArray list,int cap,boolean enforceCap,Caps caps,Factory factory){
+        Track best=null;long bestScore=Long.MAX_VALUE;
+        for(int i=0;i<list.length()&&i<32;i++){
+            JSONObject t=list.optJSONObject(i);
+            if(t==null)continue;
+            JSONObject meta=t.optJSONObject("video_meta");
+            if(meta==null)meta=t;
+            String codec=meta.optString("codec_type",t.optString("codec_type",""));
+            long size=meta.optLong("size",t.optLong("size",0));
+            int w=meta.optInt("vwidth",t.optInt("vwidth",0));
+            int h=meta.optInt("vheight",t.optInt("vheight",0));
+            String def=meta.optString("definition","").toLowerCase(Locale.US);
+            if(size<=0||size>MAX_BYTES||w<=0||h<=0)continue;
+            if(!isDecodable(codec))continue;
+            int shortEdge=Math.min(w,h);
+            if(enforceCap&&cap>0&&shortEdge>cap)continue;
+            if(!caps.supports(codec,w,h))continue;
+            int tier=shortEdge>=1080?0:shortEdge>=720?1:shortEdge>=540?2:shortEdge>=480?3:4;
+            long score=tier*1000000L+size/1024;
+            if(score<bestScore){bestScore=score;best=factory.create(t,meta,def,codec,w,h,size);}
+        }
         return best;
     }
 
@@ -217,8 +232,9 @@ public final class TrackPicker {
         throw new IllegalStateException("video_list 结构异常");
     }
 
-    private static Boolean sHevcSupported;
-    private static Boolean sAvcSupported;
+    // Resolution matters: a decoder that handles 480p may reject 1080p.
+    // Cache per mime+size instead of one boolean per codec family.
+    private static final java.util.Map<String,Boolean> sCapabilities = new java.util.HashMap<>();
 
     /** 问系统解码器是否支持该编码与分辨率。结果缓存，避免每集都遍历。 */
     private static boolean deviceSupports(String codec, int w, int h) {
@@ -229,36 +245,47 @@ public final class TrackPicker {
         } else {
             mime = "video/hevc";     // bytevc1/hevc/h265 都走 hevc 解码器
         }
-        Boolean cached = mime.equals("video/avc") ? sAvcSupported : sHevcSupported;
-        if (cached != null) {
-            return cached;
+        String key = mime + "@" + w + "x" + h;
+        synchronized (sCapabilities) {
+            Boolean cached = sCapabilities.get(key);
+            if (cached != null) return cached;
         }
         boolean ok = probe(mime, w, h);
-        if (mime.equals("video/avc")) {
-            sAvcSupported = ok;
-        } else {
-            sHevcSupported = ok;
-        }
-        Log.i(TAG, "解码能力 " + mime + " -> " + ok);
+        synchronized (sCapabilities) { sCapabilities.put(key, ok); }
+        Log.i(TAG, "解码能力 " + key + " -> " + ok);
         return ok;
     }
 
     private static boolean probe(String mime, int w, int h) {
         try {
             MediaCodecList list = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+            boolean hasMime = false;
             for (MediaCodecInfo info : list.getCodecInfos()) {
-                if (!info.isEncoder()) {
-                    for (String type : info.getSupportedTypes()) {
-                        if (type.equalsIgnoreCase(mime)) {
-                            return true;   // 有该 mime 的解码器即认为可用
-                        }
+                if (info.isEncoder()) continue;
+                for (String type : info.getSupportedTypes()) {
+                    if (!type.equalsIgnoreCase(mime)) continue;
+                    hasMime = true;
+                    // A MIME match alone is not enough: a 1080p track on a
+                    // decoder capped at 720p still fails at surface creation.
+                    try {
+                        MediaCodecInfo.VideoCapabilities video = info.getCapabilitiesForType(type).getVideoCapabilities();
+                        if (video != null && video.isSizeSupported(w, h)) return true;
+                    } catch (Throwable ignored) {
+                        // Some vendor codecs expose no video capabilities.
+                        return true;
                     }
                 }
             }
+            // Vendor codecs are inconsistent; if a MIME exists at all, let
+            // MediaPlayer make the final call rather than hiding every track.
+            if (hasMime) {
+                Log.i(TAG, "解码器未报告尺寸能力，按 MIME 存在处理 " + mime + " " + w + "x" + h);
+                return true;
+            }
+            return false;
         } catch (Throwable e) {
             Log.w(TAG, "查询解码器失败，按支持处理", e);
             return true;    // 查不到时不阻塞播放，让 MediaPlayer 自己报错
         }
-        return false;
     }
 }

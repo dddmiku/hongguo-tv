@@ -29,7 +29,6 @@ import java.util.List;
 import java.util.Locale;
 
 import cn.hongguo.tv.api.Api;
-import cn.hongguo.tv.api.WebPlayback;
 import cn.hongguo.tv.cache.MediaCache;
 import cn.hongguo.tv.cache.PlayProgress;
 import cn.hongguo.tv.media.EpisodePreparer;
@@ -437,32 +436,39 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
             try {
                 JSONObject j;
                 JSONObject vm;
-                try {
-                    j = api.videoModel(ep.vid);
-                    vm = Api.findVideoModel(j, ep.vid);
-                } catch (java.io.IOException error) {
-                    Log.i(TAG, "App 取流失败，尝试官网通道: " + error.getMessage());
-                    if (tryWebPlayback(request, ep, cap, cancellation)) return;
-                    throw error;
-                }
+                j = api.videoModel(ep.vid);
+                vm = Api.findVideoModel(j, ep.vid);
                 if (vm == null) {
-                    Log.i(TAG, "App 取流无轨道，尝试官网通道");
-                    if (tryWebPlayback(request, ep, cap, cancellation)) return;
                     postLoad(request, () -> fail("取流失败"));
                     return;
                 }
-                TrackPicker.Track t = TrackPicker.pick(vm, cap);
-                Log.i(TAG, "第 " + ep.num + " 集 选中 " + t);
+                TrackPicker.Track t;
+                try {
+                    t = TrackPicker.pick(vm, cap);
+                } catch (TrackPicker.NoDecodableTrackException noTrack) {
+                    // PC-client parity: when the model pins ByteVC2 tracks a TV
+                    // cannot decode, re-request the official compatible
+                    // rendition through the same real-app signed session.
+                    Log.i(TAG, "App 轨道不可解，按 PC 客户端方式重取兼容轨道");
+                    JSONObject compatible = api.compatibleVideoModel(vm, ep.vid);
+                    JSONObject compatibleModel = compatible == null ? null
+                            : Api.findVideoModel(compatible, ep.vid);
+                    if (compatibleModel == null) compatibleModel = compatible;
+                    if (compatibleModel == null) throw noTrack;
+                    t = TrackPicker.pick(compatibleModel, cap);
+                }
+                final TrackPicker.Track selected = t;
+                Log.i(TAG, "第 " + ep.num + " 集 选中 " + selected);
                 if (request != loadGeneration) return;
                 postLoad(request, () -> {
-                    actualDefinition = t.definition;
+                    actualDefinition = selected.definition;
                     updateQualityLabel();
                 });
                 // 缓存键要带清晰度，否则换档会命中旧档的文件
-                String bucket = t.definition;
+                String bucket = selected.definition;
                 synchronized (preparationLock) {
                 if (request != loadGeneration || cancellation.cancelled()) return;
-                preparer.prepare(ep.vid, t, cancellation, new EpisodePreparer.Listener() {
+                preparer.prepare(ep.vid, selected, cancellation, new EpisodePreparer.Listener() {
                             @Override
                             public void onProgress(String stage, int pct) {
                                 postLoad(request, () -> setStatus("第 " + ep.num + " 集 "
@@ -503,36 +509,6 @@ public class PlayerActivity extends TvActivity implements SurfaceHolder.Callback
     private boolean currentPlayer(MediaPlayer candidate, int request) {
         return candidate == player && request == loadGeneration && playbackUiActive()
                 && foreground && samePlaybackAccount();
-    }
-
-    /**
-     * Resolve the episode through the official website route and download it
-     * like any other unencrypted track. Returns true when preparation started.
-     */
-    private boolean tryWebPlayback(int request, Ep ep, int cap, PreparationCancellation cancellation) {
-        try {
-            String cookie = cn.hongguo.tv.account.Account.load(this).cookie;
-            WebPlayback.Result result = WebPlayback.resolve(ep.vid, seriesId, cap + "p", cookie);
-            TrackPicker.Track track = TrackPicker.direct(result.url, result.definition);
-            postLoad(request, () -> { actualDefinition = track.definition; updateQualityLabel(); });
-            synchronized (preparationLock) {
-                if (request != loadGeneration) return true;
-                preparer.prepare(ep.vid, track, cancellation, new EpisodePreparer.Listener() {
-                    @Override public void onProgress(String stage, int pct) {
-                        postLoad(request, () -> setStatus("第 " + ep.num + " 集 " + stage
-                                + (pct > 0 && pct < 100 ? " " + pct + "%" : "")));
-                    }
-                    @Override public void onDone(java.io.File plain) {
-                        postLoad(request, () -> startPlayback(plain, ep.num));
-                    }
-                    @Override public void onError(String message) { postLoad(request, () -> fail(message)); }
-                });
-            }
-            return true;
-        } catch (Throwable error) {
-            Log.i(TAG, "官网通道不可用，回退签名取流: " + error.getMessage());
-            return false;
-        }
     }
 
     private void startPlayback(File f, int epNum) {

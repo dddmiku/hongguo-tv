@@ -2,6 +2,7 @@ package cn.hongguo.tv.sign;
 
 import android.content.Context;
 import android.net.Uri;
+import android.os.Build;
 import org.json.JSONArray;
 import java.io.File;
 import java.io.FileInputStream;
@@ -24,6 +25,12 @@ public final class RequestSigner {
     private static boolean failed;
     private final Context context;
     private static final String SHA64="c6831ab265a0cb76dacfa3b7041e9ea0f706490106a74e12f39058671cc14fe3";
+    // armeabi-v7a 的签名 so 与 64 位版本是不同文件；校验必须按运行时 ABI 选择。
+    private static final String SHA32="90a7a2b5e7f1f3c01100f2c1995b4de2371e9c90b8a2acff4fc2a8aa48764339";
+    private static boolean is32Bit(){
+        for(String abi:Build.SUPPORTED_ABIS)if("armeabi-v7a".equals(abi))return true;
+        return false;
+    }
     private static final String HEADER_PATTERN="X-(Argus|Gorgon|Helios|Khronos|Ladon|Medusa)";
 
     public RequestSigner(Context context){this.context=context.getApplicationContext();}
@@ -100,11 +107,13 @@ public final class RequestSigner {
         try{MS.sVersionCode=code==null?74332:Integer.parseInt(code);}catch(NumberFormatException error){MS.sVersionCode=74332;}
         if(!loaded){
             File library=new File(ctx.getApplicationInfo().nativeLibraryDir,"libhongguo_signer.so");
-            if(!SHA64.equals(sha256(library)))
+            String expected=is32Bit()?SHA32:SHA64;
+            if(!expected.equals(sha256(library)))
                 throw new IOException("播放组件版本不匹配，请更新应用");
             MS.sFilesDir=ctx.getFilesDir().getAbsolutePath();
             MS.sContext=ctx;
-            System.loadLibrary("c++_shared");
+            // 32 位签名 so 依赖系统 libstdc++；libc++_shared 只在 64 位包内。
+            if(!is32Bit())System.loadLibrary("c++_shared");
             System.load(library.getAbsolutePath());
             loaded=true;
         }

@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import cn.hongguo.tv.net.Http;
+import cn.hongguo.tv.net.Http;
 import cn.hongguo.tv.sign.RequestSigner;
 
 /**
@@ -1128,5 +1129,72 @@ public final class Api {
             }
         }
         return null;
+    }
+
+    /**
+     * PC-client parity: some models pin ByteVC2 file ids that TVs cannot decode.
+     * The model carries an official signed fallback_api; drop force_fids and ask
+     * for codec_type=1 to obtain the compatible (H.264/HEVC) rendition.
+     * No website path is used.
+     */
+    public JSONObject compatibleVideoModel(JSONObject model, String vid) throws IOException {
+        if (model == null) return null;
+        String fallback = model.optString("fallback_api", "");
+        if (fallback.isEmpty()) {
+            JSONObject data = model.optJSONObject("data");
+            if (data != null) fallback = data.optString("fallback_api", "");
+        }
+        if (fallback.isEmpty()) return null;
+        java.net.URI uri;
+        try { uri = java.net.URI.create(fallback); } catch (IllegalArgumentException error) { return null; }
+        String host = uri.getHost();
+        if (host == null || !(host.equals("snssdk.com") || host.endsWith(".snssdk.com")
+                || host.equals("bytedance.com") || host.endsWith(".bytedance.com"))) return null;
+        java.util.List<String> pairs = new java.util.ArrayList<>();
+        String query = uri.getRawQuery();
+        if (query != null) {
+            for (String part : query.split("&")) {
+                if (part.isEmpty()) continue;
+                String key = part;
+                int eq = part.indexOf('=');
+                if (eq >= 0) key = part.substring(0, eq);
+                if ("force_fids".equals(key) || "codec_type".equals(key)) continue;
+                pairs.add(part);
+            }
+        }
+        pairs.add("codec_type=1");
+        String endpoint = uri.getScheme() + "://" + uri.getRawAuthority() + uri.getRawPath() + "?" + String.join("&", pairs);
+        Http.Response response = Http.get(endpoint, headers(false), signerAdapter);
+        if (!response.ok() || response.body == null || response.body.isEmpty()) return null;
+        JSONObject payload;
+        try { payload = new JSONObject(response.body); } catch (org.json.JSONException error) { return null; }
+        if (payload.optInt("code", -1) != 0) return null;
+        JSONObject info = payload.optJSONObject("video_info");
+        if (info == null || info.optInt("code", -1) != 0) return null;
+        JSONObject data = info.optJSONObject("data");
+        if (data == null) return null;
+        try {
+        // The compatible model may deliver base64 URL envelopes plus a per-model
+        // key_seed. Decode them exactly as the desktop provider does; otherwise
+        // the downloader receives ciphertext instead of an https URL.
+        String seed = data.optString("key_seed", model.optString("key_seed", ""));
+        if (!seed.isEmpty()) {
+            org.json.JSONArray rows = data.optJSONArray("video_list");
+            if (rows != null) {
+                for (int i = 0; i < rows.length(); i++) {
+                    JSONObject row = rows.optJSONObject(i);
+                    if (row == null) continue;
+                    for (String field : new String[]{"main_url", "backup_url_1", "backup_url",
+                            "backup_url_2", "backup_url_3"}) {
+                        String value = row.optString(field, "");
+                        if (value.isEmpty() || value.startsWith("http")) continue;
+                        String plain = PlaybackUrlCodec.decode(value, seed);
+                        if (plain != null) row.put(field, plain);
+                    }
+                }
+            }
+        }
+        } catch (org.json.JSONException error) { return null; }
+        return data;
     }
 }
